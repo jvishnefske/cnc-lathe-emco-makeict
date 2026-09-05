@@ -1,0 +1,358 @@
+#!/usr/bin/env python3
+"""ac95-probe.py — GUARDED active probing of the EMCO AC95 control box.
+
+This tool TRANSMITS on a serial line that may be connected to a machine
+capable of moving under power. It exists to discover the undocumented AC95
+wire protocol by sending one carefully chosen probe at a time and recording
+what comes back.
+
+Interlocks, in order:
+  1. Refuses to run at all without --i-am-at-the-machine.
+  2. Prints a physical safety checklist and requires you to type
+     "I UNDERSTAND" before the port is opened.
+  3. Probes are ordered strictly safest-first: pure enquiry bytes, then
+     status/identify text, and only then — locked behind the separate
+     --allow-motion flag AND a per-probe typed confirmation — anything
+     that could conceivably command movement.
+  4. Every probe waits for Enter before it is sent (skip with 's',
+     quit with 'q').
+  5. --dry-run prints exactly what each probe would put on the wire,
+     byte for byte, and sends nothing. It needs no flags and no port.
+
+Start with tools/ac95-listen.py (transmit-free) and the DOSBox capture
+route (tools/dosbox-capture/) before reaching for this tool.
+
+Requires pyserial (`nix develop` from the repo root, or
+`pip install pyserial`) — except for --dry-run and --list, which need
+nothing.
+"""
+
+import argparse
+import sys
+import time
+
+# Tiers: 0 = enquiry (single control bytes / bare terminators)
+#        1 = status / identify text (still should not move anything)
+#        2 = MOTION-ADJACENT (requires --allow-motion + typed confirmation)
+PROBES = [
+    # --- tier 0: pure enquiry -------------------------------------------
+    ("cr",       0, b"\r",         "bare carriage return — the gentlest "
+                                   "possible poke; many controllers answer "
+                                   "a prompt or error"),
+    ("crlf",     0, b"\r\n",       "CR+LF pair"),
+    ("enq",      0, b"\x05",       "ASCII ENQ (0x05) — classic 'are you "
+                                   "there?' of 80s serial equipment"),
+    ("question", 0, b"?",          "single '?' — realtime status request on "
+                                   "many controllers"),
+    ("question-cr", 0, b"?\r",     "'?' with CR terminator"),
+    ("xon",      0, b"\x11",       "XON (0x11) — announces we are ready to "
+                                   "receive, in case the box waits for it"),
+    ("nak",      0, b"\x15",       "ASCII NAK (0x15) — some block protocols "
+                                   "resend/identify on NAK"),
+    # --- tier 1: status / identify text ---------------------------------
+    ("percent",  1, b"%\r",        "ISO/Fanuc tape start '%' — a DNC "
+                                   "listener may acknowledge it"),
+    ("ver",      1, b"VER\r",      "'VER' — version enquiry guess"),
+    ("id",       1, b"ID\r",       "'ID' — identify enquiry guess"),
+    ("status",   1, b"STATUS\r",   "'STATUS' — status enquiry guess"),
+    ("dollar",   1, b"$\r",        "'$' — settings/help enquiry guess"),
+    ("empty-n",  1, b"N0\r",       "empty numbered block 'N0' — tests block "
+                                   "acceptance without any command word"),
+    # --- tier 2: MOTION-ADJACENT (opt-in, clearly labelled) --------------
+    ("g4-zero",  2, b"G4 P0\r",    "MOTION-ADJACENT: zero-length dwell — a "
+                                   "real interpreter acks it; nothing should "
+                                   "move, but it IS a command"),
+    ("m5",       2, b"M5\r",       "MOTION-ADJACENT: spindle stop — 'safe' "
+                                   "state command, but commands the machine"),
+    ("g0-zero",  2, b"G91\rG0 X0\r",
+                                   "MOTION-ADJACENT: incremental zero-length "
+                                   "rapid — if the interpreter is sloppy "
+                                   "this could MOVE THE AXES"),
+    ("g1-tiny",  2, b"G91\rG1 X0.1 F10\r",
+                                   "MOVEMENT: deliberate 0.1 mm X move at "
+                                   "F10 — the definitive test that blocks "
+                                   "are executed. THE MACHINE WILL MOVE."),
+]
+
+CHECKLIST = """
++--------------------------------------------------------------------+
+|  SAFETY CHECKLIST — confirm every line before continuing           |
+|                                                                    |
+|   [ ] Chuck is EMPTY — no workpiece, no chuck key                  |
+|   [ ] Tooling clear — turret can rotate and axes can move          |
+|       through their whole envelope without hitting anything        |
+|   [ ] Guard/door closed                                            |
+|   [ ] One hand on the MAINS SWITCH of the control box              |
+|   [ ] Nobody else near the machine                                 |
+|   [ ] You will stay at the machine for the entire session          |
+|                                                                    |
+|  The Ctrl-C stop this tool sends is ADVISORY. The mains switch     |
+|  is the only real stop.                                            |
++--------------------------------------------------------------------+
+"""
+
+
+def fmt_bytes(data):
+    hx = " ".join("%02x" % b for b in data)
+    asc = "".join(chr(b) if 0x20 <= b <= 0x7E else "." for b in data)
+    return "%s  |%s|" % (hx, asc)
+
+
+class Log:
+    def __init__(self, path):
+        self.f = open(path, "a")
+        self.write("# ac95-probe transcript, started %s"
+                   % time.strftime("%Y-%m-%d %H:%M:%S"))
+
+    def write(self, line):
+        stamp = time.strftime("%H:%M:%S") + ".%03d" % (time.time() % 1 * 1000)
+        text = "%s %s" % (stamp, line)
+        print(text)
+        self.f.write(text + "\n")
+        self.f.flush()
+
+    def close(self):
+        self.f.close()
+
+
+def list_probes():
+    tier_names = {0: "tier 0 — enquiry (safest)",
+                  1: "tier 1 — status/identify text",
+                  2: "tier 2 — MOTION-ADJACENT (needs --allow-motion)"}
+    cur = None
+    for pid, tier, data, desc in PROBES:
+        if tier != cur:
+            cur = tier
+            print("\n%s" % tier_names[tier])
+        print("  %-12s %-28s %s" % (pid, fmt_bytes(data).split("|")[0].strip(),
+                                    desc))
+    print()
+
+
+def dry_run(selected):
+    print("dry run — nothing will be sent. Exact bytes per probe:\n")
+    for pid, tier, data, desc in selected:
+        tag = "  [MOTION]" if tier == 2 else ""
+        print("  %-12s tier %d%s" % (pid, tier, tag))
+        print("      bytes: %s" % fmt_bytes(data))
+        print("      why:   %s" % desc)
+    print("\n%d probe(s) would run in this order." % len(selected))
+
+
+def modem_state(ser):
+    try:
+        return "CTS=%d DSR=%d DCD=%d RI=%d" % (
+            int(ser.cts), int(ser.dsr), int(ser.cd), int(ser.ri))
+    except OSError:
+        return "modem lines unavailable"
+
+
+def collect_response(ser, log, timeout, idle_gap=0.3):
+    """Read until `idle_gap` of silence after the first byte, or `timeout`
+    overall. Returns the bytes received."""
+    buf = bytearray()
+    t0 = time.monotonic()
+    last_rx = None
+    while True:
+        now = time.monotonic()
+        if now - t0 >= timeout:
+            break
+        if last_rx is not None and now - last_rx >= idle_gap:
+            break
+        data = ser.read(256)
+        if data:
+            buf += data
+            last_rx = time.monotonic()
+            log.write("RX %s" % fmt_bytes(data))
+    return bytes(buf)
+
+
+def run_probes(args, selected):
+    try:
+        import serial
+    except ImportError:
+        print("This tool needs pyserial to open the port.")
+        print("Fix: run `nix develop` from the repo root, or "
+              "`pip install pyserial`.")
+        print("(--dry-run and --list work without it.)")
+        return 1
+
+    print(CHECKLIST)
+    try:
+        ack = input('Type "I UNDERSTAND" (exactly) to open %s: ' % args.port)
+    except (EOFError, KeyboardInterrupt):
+        print("\naborted before opening the port.")
+        return 1
+    if ack.strip() != "I UNDERSTAND":
+        print("checklist not acknowledged — nothing was sent.")
+        return 1
+
+    log = Log(args.transcript)
+    print("transcript: %s" % args.transcript)
+    try:
+        ser = serial.Serial(
+            port=args.port, baudrate=args.baud,
+            bytesize=serial.SEVENBITS if args.framing[0] == "7"
+            else serial.EIGHTBITS,
+            parity={"N": serial.PARITY_NONE, "E": serial.PARITY_EVEN,
+                    "O": serial.PARITY_ODD}[args.framing[1].upper()],
+            stopbits=serial.STOPBITS_TWO if args.framing[2] == "2"
+            else serial.STOPBITS_ONE,
+            rtscts=False, xonxoff=False, timeout=0.05)
+    except (OSError, serial.SerialException) as e:
+        log.write("could not open %s: %s" % (args.port, e))
+        log.close()
+        return 1
+
+    log.write("-- port open: %s @ %d %s" % (args.port, args.baud,
+                                            args.framing))
+    log.write("-- modem lines: %s" % modem_state(ser))
+    status = 0
+    ran = 0
+    try:
+        for pid, tier, data, desc in selected:
+            print()
+            label = "MOTION-ADJACENT " if tier == 2 else ""
+            log.write("-- next probe: %s (%stier %d) — %s"
+                      % (pid, label, tier, desc))
+            log.write("--   would send: %s" % fmt_bytes(data))
+            try:
+                answer = input("   Enter=send, s=skip, q=quit > ").strip()
+            except EOFError:
+                answer = "q"
+            if answer == "q":
+                log.write("-- stopped by user before probe %s." % pid)
+                break
+            if answer == "s":
+                log.write("-- skipped %s." % pid)
+                continue
+            if tier == 2:
+                try:
+                    confirm = input('   This probe can command the machine. '
+                                    'Type the probe id ("%s") to confirm: '
+                                    % pid).strip()
+                except EOFError:
+                    confirm = ""
+                if confirm != pid:
+                    log.write("-- not confirmed; skipped %s." % pid)
+                    continue
+
+            ser.reset_input_buffer()
+            log.write("-- modem before: %s" % modem_state(ser))
+            ser.write(data)
+            ser.flush()
+            log.write("TX %s" % fmt_bytes(data))
+            resp = collect_response(ser, log, args.timeout)
+            log.write("-- modem after:  %s" % modem_state(ser))
+            if resp:
+                log.write("-- probe %s: %d byte(s) received." % (pid,
+                                                                 len(resp)))
+            else:
+                log.write("-- probe %s: silence (%.1fs)." % (pid,
+                                                             args.timeout))
+            ran += 1
+            time.sleep(args.settle)
+    except KeyboardInterrupt:
+        log.write("-- Ctrl-C: sending advisory stop (0x18) and closing.")
+        try:
+            ser.write(b"\x18")
+            ser.flush()
+        except (OSError, serial.SerialException) as e:
+            log.write("-- could not send stop: %s" % e)
+        log.write("-- IF ANYTHING IS MOVING, USE THE MAINS SWITCH.")
+        status = 130
+    finally:
+        ser.close()
+        log.write("-- port closed. %d probe(s) sent." % ran)
+        log.close()
+    return status
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Guarded active probing of the EMCO AC95 control box: "
+                    "sends curated candidate strings one at a time, "
+                    "safest-first, and records everything. Only use after "
+                    "passive listening (ac95-listen.py) has told you what "
+                    "it can.",
+        epilog="Safety model: --i-am-at-the-machine gate, typed checklist "
+               "acknowledgement, per-probe Enter, and motion-adjacent "
+               "probes double-locked behind --allow-motion plus a typed "
+               "per-probe confirmation. The advisory Ctrl-C stop is not a "
+               "safety function; the mains switch is.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    ap.add_argument("--port", "-p",
+                    help="serial device, e.g. /dev/ttyUSB0 (required unless "
+                         "--dry-run/--list)")
+    ap.add_argument("--baud", "-b", type=int, default=9600, help="baud rate")
+    ap.add_argument("--framing", default="8N1",
+                    help="data bits/parity/stop bits, e.g. 8N1, 7E1")
+    ap.add_argument("--i-am-at-the-machine", action="store_true",
+                    help="required to send anything: asserts you are "
+                         "physically at the lathe with a hand on the mains "
+                         "switch")
+    ap.add_argument("--allow-motion", action="store_true",
+                    help="unlock tier-2 probes that can command the machine "
+                         "(each still needs a typed per-probe confirmation)")
+    ap.add_argument("--only", metavar="IDS",
+                    help="comma-separated probe ids to run (see --list); "
+                         "default is every unlocked probe in safe order")
+    ap.add_argument("--timeout", type=float, default=2.0, metavar="SEC",
+                    help="seconds to wait for a response per probe")
+    ap.add_argument("--settle", type=float, default=1.0, metavar="SEC",
+                    help="pause after each probe before offering the next")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="print exactly what would be sent, byte for byte, "
+                         "and send nothing (no port or flags needed)")
+    ap.add_argument("--list", action="store_true",
+                    help="list the probe catalogue and exit")
+    ap.add_argument("--transcript", metavar="FILE",
+                    default=time.strftime("probe-%Y%m%d-%H%M%S.log"),
+                    help="timestamped transcript of both directions")
+    args = ap.parse_args()
+
+    if args.list:
+        list_probes()
+        return 0
+
+    selected = [p for p in PROBES if args.allow_motion or p[1] < 2]
+    if args.only:
+        wanted = [s.strip() for s in args.only.split(",")]
+        by_id = {p[0]: p for p in PROBES}
+        unknown = [w for w in wanted if w not in by_id]
+        if unknown:
+            ap.error("unknown probe id(s): %s (see --list)"
+                     % ", ".join(unknown))
+        selected = [by_id[w] for w in wanted]
+        blocked = [p for p in selected if p[1] == 2 and not args.allow_motion
+                   and not args.dry_run]
+        if blocked:
+            ap.error("probe(s) %s are motion-adjacent; add --allow-motion "
+                     "to unlock them"
+                     % ", ".join(p[0] for p in blocked))
+
+    if args.dry_run:
+        dry_run(selected)
+        return 0
+
+    if not args.i_am_at_the_machine:
+        print("REFUSING TO RUN.")
+        print()
+        print("This tool transmits to a control box that can move a lathe "
+              "under power.")
+        print("If you are physically at the machine and it is safe, re-run "
+              "with:")
+        print()
+        print("    --i-am-at-the-machine")
+        print()
+        print("To see what would be sent without any risk: --dry-run")
+        print("To see the probe catalogue:                 --list")
+        return 2
+    if not args.port:
+        ap.error("--port is required (unless --dry-run or --list)")
+
+    return run_probes(args, selected)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

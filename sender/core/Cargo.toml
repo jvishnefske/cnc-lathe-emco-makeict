@@ -1,0 +1,23 @@
+[package]
+name = "emco-sender-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core logic for the EMCO PC Turn 50 browser G-code sender: parser, backplot geometry, protocol dialects, virtual machine and session state machine. Pure and synchronous; no I/O, no clock."
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# The wasm-bindgen layer is only compiled for the wasm32 target, so native
+# `cargo test` never needs wasm-bindgen or a browser.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+serde-wasm-bindgen = "0.6"
+
+[profile.release]
+opt-level = "s"
+lto = true

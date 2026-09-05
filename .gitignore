@@ -1,0 +1,33 @@
+# Original reference photography (157 MB, 301 files) — kept out of git.
+# Curated, downscaled copies live in docs/img/ and are committed.
+reference/
+
+# Rust / wasm
+sender/core/target/
+sender/core/pkg/
+
+# Node
+node_modules/
+sender/web/dist/
+sender/web/.vite/
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Serial capture transcripts (may contain machine-specific data; commit
+# deliberately into docs/captures/ instead of leaving them loose)
+*.cap
+tools/captures/
+
+# Editors / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Sender transcripts written into the working directory
+send-*.log

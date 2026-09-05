@@ -1,0 +1,20 @@
+;  EMCO PC Turn 50 - 6-station turret
+;
+;  Three EXTERNAL stations (1-3) and three INTERNAL stations (4-6), the latter
+;  taking 10 mm shank boring bars. Max tool 12 mm, max stickout 12.7 mm.
+;
+;  X and Z are tool offsets in mm; X is a RADIUS offset.
+;  I = front angle, J = back angle, Q = tool orientation (see the LinuxCNC
+;  lathe tool orientation diagram). D is the nose radius.
+;
+;  THE OFFSETS BELOW ARE ZERO ON PURPOSE. Tool offsets are a property of the
+;  physical tool in the physical holder, not of the machine, so they must be
+;  touched off for real - see docs/40-operator-guide.md. These entries exist so
+;  the simulator draws a plausible tool shape.
+;
+T1 P1 D0.400000 X+0.000000 Z+0.000000 I+95.000000  J+155.000000 Q2 ; RH turning, 0.4 nose
+T2 P2 D0.400000 X+0.000000 Z+0.000000 I+95.000000  J+55.000000  Q2 ; facing
+T3 P3 D0.000000 X+0.000000 Z+0.000000 I+90.000000  J+90.000000  Q9 ; parting / grooving, 2 mm
+T4 P4 D0.200000 X+0.000000 Z+0.000000 I+275.000000 J+335.000000 Q8 ; boring bar, 10 mm shank
+T5 P5 D0.000000 X+0.000000 Z+0.000000 I+30.000000  J+30.000000  Q9 ; threading, 60 deg
+T6 P6 D0.000000 X+0.000000 Z+0.000000 I+0.000000   J+0.000000   Q0 ; centre drill / drill

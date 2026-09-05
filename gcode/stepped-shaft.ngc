@@ -1,0 +1,77 @@
+(  ===================================================================  )
+(  STEPPED SHAFT - two diameters, practising roughing with a subroutine )
+(  ===================================================================  )
+(  Stock  : 14 mm aluminium round, at least 45 mm proud of the collet   )
+(  Tools  : T1 right-hand turning, T3 parting blade                     )
+(                                                                       )
+(          O8              O11             O14                          )
+(       +------+        +--------+      +--------+                      )
+(       |      |        |        |      |        |   <- collet this end )
+(       +------+--------+--------+------+--------+                      )
+(         12 mm           12 mm          remainder                      )
+(                                                                       )
+(  Worth reading as a lesson in ORDER OF OPERATIONS: cut the section    )
+(  furthest from the chuck first and take the smallest diameter last,   )
+(  so the part stays as stiff as possible for as long as possible.      )
+(                                                                       )
+(  It also shows a SUBROUTINE. o<rough> takes a target diameter, a Z    )
+(  depth and a feed, so the roughing passes are one line each instead   )
+(  of four. Run it in the simulator and watch the backplot.             )
+(  ===================================================================  )
+
+G21 G18 G40 G90 G95 G7
+G53 G0 X48
+
+T1 M6
+G54
+S1400 M3
+
+(  --- face the end --- )
+G0 X16 Z1
+G1 X-0.4 F0.08
+G0 Z1
+G0 X16
+
+(  --- rough the O8 section, 0 to -12 mm, in steps on diameter --- )
+o<rough> call [12.5] [-12] [0.10]
+o<rough> call [11.0] [-12] [0.10]
+o<rough> call [9.5]  [-12] [0.10]
+o<rough> call [8.4]  [-12] [0.10]
+
+(  --- rough the O11 section, 0 to -24 mm --- )
+o<rough> call [12.5] [-24] [0.10]
+o<rough> call [11.4] [-24] [0.10]
+
+(  --- finish passes: full depth, slower feed --- )
+G0 X11 Z0.5
+G1 Z-24 F0.05
+G0 X13
+G0 Z0.5
+G0 X8
+G1 Z-12 F0.05
+G1 X11.4          ( face the shoulder outward )
+G0 X16
+
+(  --- part off at 36 mm --- )
+M5
+T3 M6
+S800 M3
+G0 X16 Z-36
+G1 X0.5 F0.04
+G0 X16
+
+M5
+G53 G0 X48 Z0
+M30
+
+(  ===================================================================  )
+(  One roughing pass: approach clear, cut to depth, retract, return.    )
+(    #1 = target diameter    #2 = Z depth    #3 = feed in mm/rev        )
+(  ===================================================================  )
+o<rough> sub
+  G0 X[#1] Z0.5
+  G1 Z[#2] F[#3]
+  G0 X[#1 + 1]     ( retract before returning, so we never rub the cut )
+  G0 Z0.5
+o<rough> endsub
+

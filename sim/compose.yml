@@ -1,0 +1,24 @@
+# LinuxCNC simulator for the EMCO PC Turn 50.
+#
+#   docker compose -f sim/compose.yml up
+#   then open http://localhost:8080/vnc.html?autoconnect=1&resize=scale
+#
+# The config and the example programs are bind-mounted, so editing them on the
+# host takes effect on the next restart — no rebuild needed.
+services:
+  linuxcnc-sim:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: emco-pcturn50-sim
+    container_name: emco-pcturn50-sim
+    ports:
+      - "8080:8080"
+    volumes:
+      - ../linuxcnc/sim/emco-pcturn50:/config:rw
+      - ../gcode:/home/cnc/gcode:rw
+    environment:
+      LINUXCNC_CONFIG: /config/emco-pcturn50.ini
+    shm_size: "256m"
+    stdin_open: true
+    tty: true

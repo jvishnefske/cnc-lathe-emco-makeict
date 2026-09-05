@@ -1,0 +1,44 @@
+# =============================================================================
+# EMCO PC Turn 50 — simulated 6-station turret
+# =============================================================================
+#
+# The real turret is a Maxon 24 VDC gearmotor through a 60:1 reduction, driven
+# from PLC output A0.2 ("forward"), with position sensed by Strobe/Sync lines
+# from turret encoder board Y4A020000. It indexes ONE WAY only, so going from
+# station 5 to station 2 takes the long way round — which is why a thoughtfully
+# ordered tool table saves real cycle time.
+#
+# Here it answers LinuxCNC's ordinary tool-change handshake after a fixed
+# delay. That is deliberately the same shape as a real turret retrofit would
+# use: iocontrol asks for a change, the turret takes its time, and reports back
+# when it has seated. No Python remap is involved, so this config does not
+# break across LinuxCNC versions.
+#
+#   iocontrol.0.tool-prepare  -> tool-prepared     (nothing to pre-stage)
+#   iocontrol.0.tool-change   -> [delay] -> tool-changed
+#
+# Before the handshake starts, LinuxCNC retracts to [EMCIO]TOOL_CHANGE_POSITION.
+# =============================================================================
+
+loadrt timedelay count=1
+addf timedelay.0 servo-thread
+
+# Roughly what a 60:1 gearmotor takes to swing a station or two.
+# UNVERIFIED: nobody has timed the real turret.
+setp timedelay.0.on-delay 1.5
+setp timedelay.0.off-delay 0.0
+
+# basic_sim.tcl has already wired the tool-change pins to its own loopback.
+# Release them before wiring the turret in, otherwise HAL refuses with
+# "Pin ... was already linked".
+unlinkp iocontrol.0.tool-prepare
+unlinkp iocontrol.0.tool-prepared
+unlinkp iocontrol.0.tool-change
+unlinkp iocontrol.0.tool-changed
+
+# Nothing to pre-stage on a turret — acknowledge the prepare immediately.
+net turret-prep    iocontrol.0.tool-prepare  iocontrol.0.tool-prepared
+
+# Index request in, "in position" out once the delay has elapsed.
+net turret-index   iocontrol.0.tool-change   timedelay.0.in
+net turret-seated  timedelay.0.out           iocontrol.0.tool-changed

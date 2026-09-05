@@ -1,0 +1,132 @@
+# =============================================================================
+# EMCO PC Turn 50 — Mesa 7i96S retrofit HAL (SKELETON — never run on hardware)
+# =============================================================================
+# All machine numbers live in the INI (tagged UNVERIFIED there); this file only
+# plumbs signals. The authoritative wiring table is docs/60-retrofit-design.md
+# sec. 5 — change it there first, then here.
+#
+# 7i96S pin families (verify against your installed LinuxCNC version and
+# `mesaflash --readhmid`; names below checked against the 2.10-dev driver
+# sources, sim runs 2.9.x):
+#   hm2_7i96s.0.stepgen.00/01/02.*      step/dir generators (TB1)
+#   hm2_7i96s.0.inm.00.input-00..10     isolated inputs (TB3), -not variants too
+#   hm2_7i96s.0.ssr.00.out-00..05       isolated outputs (TB2)
+#   hm2_7i96s.0.encoder.00.*            encoder input (spindle, doc 60 sec 4.5)
+#   hm2_7i96s.0.pwmgen.00.*             drives the isolated 0-10 V spindle out
+# =============================================================================
+
+# --------------------------------------------------------------- core loads
+loadrt [KINS]KINEMATICS
+loadrt [EMCMOT]EMCMOT servo_period_nsec=[EMCMOT]SERVO_PERIOD num_joints=[KINS]JOINTS
+loadrt hostmot2
+loadrt [HOSTMOT2]DRIVER board_ip=[HOSTMOT2]BOARD_IP config=[HOSTMOT2]CONFIG
+loadrt estop_latch
+
+# ------------------------------------------------------------------- threads
+addf hm2_[HOSTMOT2]BOARD.0.read          servo-thread
+addf motion-command-handler              servo-thread
+addf motion-controller                   servo-thread
+addf hm2_[HOSTMOT2]BOARD.0.write         servo-thread
+addf estop-latch.0                       servo-thread
+
+# =========================================================== X axis (joint 0)
+# stepgen 00 -> differential line driver (AM26C31) -> X104 X group CK+-/DIR+-
+# X104 pin order and pair polarity: UNVERIFIED — doc 60 risk R1. Meter first.
+net x-enable  joint.0.amp-enable-out  =>  hm2_[HOSTMOT2]BOARD.0.stepgen.00.enable
+net x-pos-cmd joint.0.motor-pos-cmd   =>  hm2_[HOSTMOT2]BOARD.0.stepgen.00.position-cmd
+net x-pos-fb  hm2_[HOSTMOT2]BOARD.0.stepgen.00.position-fb  =>  joint.0.motor-pos-fb
+
+setp hm2_[HOSTMOT2]BOARD.0.stepgen.00.dirsetup        [JOINT_0]DIRSETUP
+setp hm2_[HOSTMOT2]BOARD.0.stepgen.00.dirhold         [JOINT_0]DIRHOLD
+setp hm2_[HOSTMOT2]BOARD.0.stepgen.00.steplen         [JOINT_0]STEPLEN
+setp hm2_[HOSTMOT2]BOARD.0.stepgen.00.stepspace       [JOINT_0]STEPSPACE
+setp hm2_[HOSTMOT2]BOARD.0.stepgen.00.position-scale  [JOINT_0]SCALE
+setp hm2_[HOSTMOT2]BOARD.0.stepgen.00.maxvel          [JOINT_0]STEPGEN_MAX_VEL
+setp hm2_[HOSTMOT2]BOARD.0.stepgen.00.maxaccel        [JOINT_0]STEPGEN_MAX_ACC
+setp hm2_[HOSTMOT2]BOARD.0.stepgen.00.step_type       0
+
+# =========================================================== Z axis (joint 1)
+# stepgen 01 -> differential line driver -> X104 Z group. Same caveats as X.
+net z-enable  joint.1.amp-enable-out  =>  hm2_[HOSTMOT2]BOARD.0.stepgen.01.enable
+net z-pos-cmd joint.1.motor-pos-cmd   =>  hm2_[HOSTMOT2]BOARD.0.stepgen.01.position-cmd
+net z-pos-fb  hm2_[HOSTMOT2]BOARD.0.stepgen.01.position-fb  =>  joint.1.motor-pos-fb
+
+setp hm2_[HOSTMOT2]BOARD.0.stepgen.01.dirsetup        [JOINT_1]DIRSETUP
+setp hm2_[HOSTMOT2]BOARD.0.stepgen.01.dirhold         [JOINT_1]DIRHOLD
+setp hm2_[HOSTMOT2]BOARD.0.stepgen.01.steplen         [JOINT_1]STEPLEN
+setp hm2_[HOSTMOT2]BOARD.0.stepgen.01.stepspace       [JOINT_1]STEPSPACE
+setp hm2_[HOSTMOT2]BOARD.0.stepgen.01.position-scale  [JOINT_1]SCALE
+setp hm2_[HOSTMOT2]BOARD.0.stepgen.01.maxvel          [JOINT_1]STEPGEN_MAX_VEL
+setp hm2_[HOSTMOT2]BOARD.0.stepgen.01.maxaccel        [JOINT_1]STEPGEN_MAX_ACC
+setp hm2_[HOSTMOT2]BOARD.0.stepgen.01.step_type       0
+
+# X104 pin 16 "E-Achse" (axis enable) and the per-axis SR lines: semantics
+# UNVERIFIED (doc 60 sec 2). Driven from output 5 until metering says better.
+net machine-enable  motion.motion-enabled  =>  hm2_[HOSTMOT2]BOARD.0.ssr.00.out-05
+
+# ============================================== inputs (TB3, doc 60 sec 5 map)
+# Reference switches (exist per schematic: Schmersal/Omron + Balluff Sync-Bero;
+# the Beros land on inputs 1/3 for future index-style homing refinement).
+# Use the -not variants instead if metering shows the switches are NC.
+net x-home-sw  hm2_[HOSTMOT2]BOARD.0.inm.00.input-00  =>  joint.0.home-sw-in
+net z-home-sw  hm2_[HOSTMOT2]BOARD.0.inm.00.input-02  =>  joint.1.home-sw-in
+
+# NEW end-of-travel limit switches (an improvement — the original machine has
+# none and just stalls; doc 60 sec 4.2). Series pair per axis, one input each.
+net x-limits   hm2_[HOSTMOT2]BOARD.0.inm.00.input-05
+net x-limits   =>  joint.0.neg-lim-sw-in  joint.0.pos-lim-sw-in
+net z-limits   hm2_[HOSTMOT2]BOARD.0.inm.00.input-06
+net z-limits   =>  joint.1.neg-lim-sw-in  joint.1.pos-lim-sw-in
+
+# ============================================================== E-stop chain
+# HARDWARE chain (button, chip-guard + wheel-cover interlocks, drive faults)
+# drops motor power by itself; LinuxCNC only observes and requests.
+# input 4 = aux contact of the chain; output 0 = chain/enable relay coil.
+net estop-ext   hm2_[HOSTMOT2]BOARD.0.inm.00.input-04-not  =>  estop-latch.0.fault-in
+net estop-reset iocontrol.0.user-request-enable            =>  estop-latch.0.reset
+net estop-ok    estop-latch.0.ok-out                       =>  iocontrol.0.emc-enable-in
+net estop-out   iocontrol.0.user-enable-out                =>  hm2_[HOSTMOT2]BOARD.0.ssr.00.out-00
+# Also trip on the board watchdog:
+net watchdog    hm2_[HOSTMOT2]BOARD.0.watchdog.has_bit     =>  estop-latch.0.watchdog-fault-in
+
+# ================================================================== spindle
+# FRC105 inverter enable/direction via relays; speed via the isolated 0-10 V
+# output (pwmgen 00). FRC105 acceptance of all three is UNVERIFIED — doc 60
+# sec 4.4; fallback is a VFD on the existing ELIN 3-phase motor.
+net spindle-on   spindle.0.on       =>  hm2_[HOSTMOT2]BOARD.0.ssr.00.out-01
+net spindle-rev  spindle.0.reverse  =>  hm2_[HOSTMOT2]BOARD.0.ssr.00.out-02
+net spindle-vel  spindle.0.speed-out-abs  =>  hm2_[HOSTMOT2]BOARD.0.pwmgen.00.value
+net spindle-on   =>  hm2_[HOSTMOT2]BOARD.0.pwmgen.00.enable
+# rpm at full scale = the fitted belt step's top speed (INI [SPINDLE_0]).
+setp hm2_[HOSTMOT2]BOARD.0.pwmgen.00.scale  [SPINDLE_0]OUTPUT_SCALE
+
+# Spindle encoder: X109 STROBE/SYNC from board Y4A020000. Channel count and
+# resolution UNVERIFIED (doc 60 sec 4.5) — counter-mode placeholder wiring.
+setp hm2_[HOSTMOT2]BOARD.0.encoder.00.counter-mode  1
+setp hm2_[HOSTMOT2]BOARD.0.encoder.00.scale         [SPINDLE_0]ENCODER_SCALE
+net spindle-revs     hm2_[HOSTMOT2]BOARD.0.encoder.00.position  =>  spindle.0.revs
+net spindle-vel-fb   hm2_[HOSTMOT2]BOARD.0.encoder.00.velocity  =>  spindle.0.speed-in
+net spindle-index    hm2_[HOSTMOT2]BOARD.0.encoder.00.index-enable  <=>  spindle.0.index-enable
+
+# ==================================================================== turret
+# 6-station turret (3 external + 3 internal): Maxon 24 V gearmotor forward on
+# a relay (out-03), reverse/lock on out-04 (mechanism UNVERIFIED), position
+# Strobe/Sync on inputs 7/8. TODO: ClassicLadder sequencing (doc 60 sec 4.6).
+# Until then the tool-change handshake is looped back: T commands "succeed"
+# immediately and tools are changed BY HAND at the TOOL_CHANGE_POSITION.
+net tool-prep-loop    iocontrol.0.tool-prepare  =>  iocontrol.0.tool-prepared
+net tool-change-loop  iocontrol.0.tool-change   =>  iocontrol.0.tool-changed
+# Reserved I/O (unconnected nets document the map; see doc 60 sec 5):
+net turret-strobe  hm2_[HOSTMOT2]BOARD.0.inm.00.input-07
+net turret-sync    hm2_[HOSTMOT2]BOARD.0.inm.00.input-08
+net turret-fwd     hm2_[HOSTMOT2]BOARD.0.ssr.00.out-03
+net turret-rev     hm2_[HOSTMOT2]BOARD.0.ssr.00.out-04
+
+# ============================================== misc / robotic interface stubs
+# FRC105 ready/fault contact, if one exists (UNVERIFIED):
+net spindle-ready  hm2_[HOSTMOT2]BOARD.0.inm.00.input-09
+# Sync-Beros, unused until index-refined homing is implemented:
+net x-sync-bero    hm2_[HOSTMOT2]BOARD.0.inm.00.input-01
+net z-sync-bero    hm2_[HOSTMOT2]BOARD.0.inm.00.input-03
+# The original PLC's "robotic interface" (A0.x / E3.x) is not reproduced here;
+# doc 60 sec 4.7 records what each signal was and when to add a 7i84 for them.

@@ -4,7 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "npm run build:core && vite",
+    "build:core": "wasm-pack build ../core --target web",
+    "prebuild": "npm run build:core",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",

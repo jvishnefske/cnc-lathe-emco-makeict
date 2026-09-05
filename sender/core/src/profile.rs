@@ -8,6 +8,14 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Default G54 work offset on Z, machine coordinates: "a piece of stock whose
+/// face was touched off 50 mm in from the reference point". Matches the
+/// LinuxCNC simulator's shipped parameter file
+/// (`linuxcnc/sim/emco-pcturn50/emco-pcturn50.var`, parameter 5223), so the
+/// sender, the LinuxCNC sim and the example programs in `gcode/` all agree.
+/// On the real machine the operator touches this off for every new stock.
+pub const DEFAULT_G54_Z_MM: f64 = -50.0;
+
 /// Which wire dialect `Session` speaks. See `docs/30-serial-protocol.md`.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DialectKind {
@@ -96,14 +104,19 @@ impl MachineProfile {
     pub fn pc_turn_50_default() -> MachineProfile {
         MachineProfile {
             name: "EMCO PC Turn 50".to_string(),
-            // From EMCO manual: X travel 48 mm (radius axis), not re-measured.
-            x_min_mm: 0.0,
+            // From EMCO manual: X travel 48 mm of radius, not re-measured.
+            // The -0.5 mm margin below centreline matches the LinuxCNC sim
+            // config (AXIS_X MIN_LIMIT) and is what lets a facing pass cut
+            // slightly past centre so no pip is left.
+            x_min_mm: -0.5,
             x_max_mm: 48.0,
             // From EMCO manual: Z travel 228 mm usable (275 mm mechanical),
-            // not re-measured. Negative toward the chuck, 0 at the reference
-            // end of usable travel.
+            // not re-measured. Machine zero is at the reference point and all
+            // working travel runs negative from it (toward the chuck); the
+            // +0.5 mm margin matches the LinuxCNC sim config (AXIS_Z
+            // MAX_LIMIT).
             z_min_mm: -228.0,
-            z_max_mm: 0.0,
+            z_max_mm: 0.5,
             // From EMCO manual: rapid traverse 750 mm/min.
             rapid_mm_min: 750.0,
             // From EMCO manual: feed range 0-750 mm/min (1500 absolute max).
@@ -157,8 +170,9 @@ mod tests {
     #[test]
     fn default_profile_matches_the_manual() {
         let p = MachineProfile::default();
-        assert_eq!((p.x_min_mm, p.x_max_mm), (0.0, 48.0));
-        assert_eq!(p.z_max_mm - p.z_min_mm, 228.0);
+        assert_eq!((p.x_min_mm, p.x_max_mm), (-0.5, 48.0), "LinuxCNC sim envelope");
+        assert_eq!((p.z_min_mm, p.z_max_mm), (-228.0, 0.5), "LinuxCNC sim envelope");
+        assert_eq!(DEFAULT_G54_Z_MM, -50.0, "LinuxCNC var parameter 5223");
         assert_eq!(p.rapid_mm_min, 750.0);
         assert_eq!(p.max_feed_mm_min, 750.0);
         assert_eq!(p.resolution_mm, 0.001);

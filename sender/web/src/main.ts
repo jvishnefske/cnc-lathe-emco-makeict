@@ -30,7 +30,7 @@ import { WebcamPane } from "./ui/webcam";
 const DEMO_NAME = "demo-part.nc";
 const DEMO_GCODE = `( EMCO PC Turn 50 demo part — 14 mm bar in the ESX 25 collet )
 ( diameter mode, mm, absolute )
-G21 G90 G7
+G21 G94 G90 G7
 T0101 ( station 1 — external turning )
 M3 S1200
 G0 X16 Z2

@@ -253,10 +253,19 @@ pub trait Dialect {
 }
 ```
 
-Ship two implementations: `PlainGcode` (line-oriented text, CR terminated, CTS/XON gating — the
-community's best guess at the AC95) and `Ac95` (a stub that starts identical to `PlainGcode` and
-gets corrected as discovery findings land). Swapping dialects must not require touching the UI, the
-backplot or `Session`'s state machine.
+Ship two implementations:
+
+- **`PlainGcode`** — line-oriented text, CR terminated, XON/XOFF and CTS gating. This is a
+  **development and training fiction**, not the machine protocol. It is what `VirtualMachine`
+  speaks, which is what makes the whole app testable and useful today.
+- **`EmcoStub`** — the real dialect, deliberately still a stub. It delegates to `PlainGcode` with
+  `TODO(protocol)` seams where discovery findings will land.
+
+Do not name anything `Ac95`: there is no such board in this machine. The community's
+"AC95 / `Y4B081000`" is a part number from a different EMCO model; this machine's brain is the
+axis-controller board `Y4A012000`.
+
+Swapping dialects must not require touching the UI, the backplot or `Session`'s state machine.
 
 ## Safety
 

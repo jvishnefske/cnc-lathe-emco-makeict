@@ -34,7 +34,7 @@ export class ConnectionBar {
   private busy = false;
 
   constructor(
-    private defaults: SerialSettings,
+    defaults: SerialSettings,
     private cb: ConnectionCallbacks,
   ) {
     this.el = document.createElement("header");

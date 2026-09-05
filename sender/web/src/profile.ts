@@ -17,17 +17,23 @@ export const DEFAULT_PROFILE: MachineProfile = {
   zMaxMm: 0,
   rapidMmMin: 750, // rapid traverse [MANUAL]
   maxFeedMmMin: 750, // working feed range 0–750 (1500 absolute max) [MANUAL]
+  resolutionMm: 0.001, // step resolution [MANUAL]
   accelMmSec2: 100, // UNVERIFIED
   spindleMinRpm: 130,
   spindleMaxRpm: 3000, // via three belt steps: 130–1300 / 200–2000 / 300–3000
+  spindleBeltSteps: [
+    { minRpm: 130, maxRpm: 1300 },
+    { minRpm: 200, maxRpm: 2000 },
+    { minRpm: 300, maxRpm: 3000 },
+  ],
+  threadingMaxRpm: 400, // threading synchronised only up to 400 rpm [MANUAL]
   turretStations: 6, // 3 external + 3 internal [MANUAL]
   turretIndexSeconds: 2, // UNVERIFIED
-  serial: {
-    baud: 9600,
-    dataBits: 8,
-    stopBits: 1,
-    parity: "none",
-    flowControl: "none",
+  hasEndOfTravelLimits: false, // travel ends at mechanical stops [MANUAL]
+  requiresReferenceAfterPowerOn: true, // no absolute position memory [MANUAL]
+  link: {
+    kind: "rs485", // X300 DB9: pin 2 GND, 3 DATA−, 8 DATA+ [SCHEM]
+    baud: 9600, // UNVERIFIED — wire framing not yet characterised
   },
   dialect: "plain-gcode",
 };

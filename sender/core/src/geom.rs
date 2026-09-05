@@ -329,7 +329,7 @@ mod tests {
     fn g76_simplified_to_thread_with_warning() {
         let p = parse("G8\nG0 X8 Z2\nG76 X7.0 Z-15 F1.0");
         assert!(p.segments.iter().any(|s| s.kind == SegKind::Thread));
-        assert!(p.diagnostics.iter().any(|d| d.message.contains("G76")));
+        assert!(p.diagnostics.iter().any(|d| d.message.contains("single thread pass")));
     }
 
     #[test]

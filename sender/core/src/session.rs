@@ -579,6 +579,29 @@ impl Session {
             self.modal.z = self.z;
             let fx = self.modal.apply_block(&q.block, &mut diags);
 
+            // Sender-side soft-limit safety net. The real machine has no
+            // end-of-travel limit switches - an overtravel move just stalls
+            // the stepper and silently loses position - so the *sender*
+            // refuses to transmit a move whose swept extent leaves the
+            // profile's travel. Always on: it is the only limit this machine
+            // has.
+            if let Some(m) = &fx.motion {
+                if self.motion_exceeds_travel(m) {
+                    self.modal.x = self.x;
+                    self.modal.z = self.z;
+                    self.raise_alarm(
+                        "SOFTLIMIT",
+                        &format!(
+                            "move exceeds machine travel (line {}); block not sent — \
+                             the machine has no limit switches and would stall",
+                            q.line
+                        ),
+                        out,
+                    );
+                    return;
+                }
+            }
+
             let dry = self.dry_run && q.job == JobKind::Program;
             if !dry {
                 let bytes = self.dialect.encode_block(&q.block);
@@ -608,6 +631,34 @@ impl Session {
             // At most one block per tick in dry-run so progress is visible;
             // otherwise a block is now in flight and the pump stops anyway.
         }
+    }
+
+    /// Does a move's swept extent (endpoint, and arc extrema for arcs) leave
+    /// the profile's travel box?
+    fn motion_exceeds_travel(&self, m: &MotionCmd) -> bool {
+        let seg = crate::geom::Segment {
+            kind: match m.kind {
+                MoveKind::Arc { .. } => crate::geom::SegKind::Arc,
+                _ => crate::geom::SegKind::Feed,
+            },
+            x0: m.x0,
+            z0: m.z0,
+            x1: m.x1,
+            z1: m.z1,
+            cx: match m.kind { MoveKind::Arc { cx, .. } => Some(cx), _ => None },
+            cz: match m.kind { MoveKind::Arc { cz, .. } => Some(cz), _ => None },
+            ccw: match m.kind { MoveKind::Arc { ccw, .. } => Some(ccw), _ => None },
+            line: 0,
+            feed_mm_min: None,
+            tool: None,
+        };
+        let b = crate::geom::segment_bounds(&seg);
+        let p = &self.profile;
+        let eps = 1e-6;
+        b.x_min < p.x_min_mm - eps
+            || b.x_max > p.x_max_mm + eps
+            || b.z_min < p.z_min_mm - eps
+            || b.z_max > p.z_max_mm + eps
     }
 
     /// Move the display position along the in-flight move at the commanded
@@ -642,6 +693,9 @@ mod tests {
     fn session() -> Session {
         let mut p = MachineProfile::pc_turn_50_default();
         p.dialect = crate::profile::DialectKind::PlainGcode;
+        // Clearance travel above the work face for test programs' positive-Z
+        // approach moves (the real z_max is the reference at 0).
+        p.z_max_mm = 50.0;
         Session::new(p)
     }
 
@@ -771,10 +825,10 @@ mod tests {
     fn nak_raises_alarm_state() {
         let mut s = session();
         s.tick(0.0, &[]);
-        s.load_program(&Program::parse("G8 G94 F100\nG1 X999\nM30"));
+        s.load_program(&Program::parse("G8 G94 F100\nG1 X5\nM30"));
         s.command(Command::Run);
         s.tick(1.0, &[]);
-        let out = s.tick(2.0, b"error: soft limit\r\n");
+        let out = s.tick(2.0, b"error: unparseable block\r\n");
         assert_eq!(s.state().run, RunState::Alarm);
         assert!(out.events.iter().any(|e| matches!(e, Event::Alarm { .. })));
         assert_eq!(s.state().alarms.len(), 1);
@@ -904,7 +958,7 @@ mod tests {
         let st = s.state();
         assert_eq!(st.run, RunState::Idle);
         assert!(st.dro.homed);
-        assert!((st.dro.x_radius_mm - 50.0).abs() < 1e-9, "home = +travel end");
+        assert!((st.dro.x_radius_mm - 48.0).abs() < 1e-9, "home = reference at X48");
     }
 
     #[test]
@@ -945,7 +999,7 @@ mod tests {
         s.tick(0.0, &[]);
         s.tick(500.0, &[]); // halfway, no ack yet
         let d = s.dro();
-        // F600 clamps to profile max feed 500 -> 8.33 mm/s -> ~4.2 mm at 500 ms.
+        // F600 (within the 750 max) -> 10 mm/s -> ~5 mm at 500 ms.
         assert!(d.z_mm < -2.0 && d.z_mm > -8.0, "should be mid-move, got {}", d.z_mm);
         assert!(d.z_dtg_mm < -1.0, "distance to go should be negative toward target");
         s.tick(1500.0, b"ok\r\n");
@@ -980,6 +1034,41 @@ mod tests {
         s.set_cts(true);
         let out = s.tick(2.0, &[]);
         assert_eq!(sent_lines(&out), vec![0]);
+    }
+
+    #[test]
+    fn sender_refuses_overtravel_block() {
+        // The machine has no limit switches, so the sender must be the net:
+        // an overtravel move is never transmitted.
+        let mut s = session();
+        s.tick(0.0, &[]);
+        s.load_program(&Program::parse("G8 G94 F100\nG1 X100\nM30")); // x_max 48
+        s.command(Command::Run);
+        s.tick(1.0, &[]); // modal block goes out
+        let out = s.tick(2.0, b"ok\r\n"); // acked; overtravel block is next
+        assert!(out.tx.is_empty(), "overtravel block must not hit the wire");
+        assert_eq!(s.state().run, RunState::Alarm);
+        assert!(s.state().alarms[0].code.contains("SOFT"));
+        assert!(s.state().alarms[0].message.contains("no limit switches"));
+    }
+
+    #[test]
+    fn sender_refuses_overtravel_jog() {
+        let mut s = session();
+        s.tick(0.0, &[]);
+        s.command(Command::Jog { axis: Axis::X, delta_mm: 100.0, feed_mm_min: 100.0 });
+        let out = s.tick(1.0, &[]);
+        assert!(out.tx.is_empty());
+        assert_eq!(s.state().run, RunState::Alarm);
+    }
+
+    #[test]
+    fn session_starts_unreferenced() {
+        // requiresReferenceAfterPowerOn: the UI must be able to see homed=false
+        // and insist on a reference cycle.
+        let mut s = session();
+        s.tick(0.0, &[]);
+        assert!(!s.state().dro.homed);
     }
 
     #[test]

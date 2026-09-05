@@ -2,11 +2,10 @@
  * Adapter that puts the real Rust/WASM core (sender/core, built with
  * wasm-pack into sender/core/pkg) behind the CoreApi interface.
  *
- * The pkg directory DOES NOT EXIST until `wasm-pack build` has been run in
- * sender/core, so the import below is a runtime dynamic import which Vite is
- * told not to resolve at build time (@vite-ignore). If it fails, loadWasmCore
- * rejects and the caller falls back to the mock core. Nothing else in the app
- * may import from core/pkg — this file is the only place that path appears.
+ * The import below is a lazy dynamic import; if it fails (pkg missing or
+ * incompatible), loadWasmCore rejects and the caller falls back to the mock
+ * core. Nothing else in the app may import from core/pkg — this file is the
+ * only place that path appears.
  */
 
 import type { CoreApi, ProgramApi, SessionApi, VirtualMachineApi } from "./api";
@@ -125,8 +124,10 @@ class WasmCore implements CoreApi {
 
 /** The one place the core/pkg path exists. Rejects when the wasm build is absent. */
 export async function loadWasmCore(): Promise<CoreApi> {
-  const path = "../../../core/pkg/sender_core.js";
-  const mod = (await import(/* @vite-ignore */ path)) as WasmModule;
+  // A real (non-@vite-ignore) dynamic import so Vite bundles the wasm-bindgen
+  // glue and emits the .wasm as an asset; still lazy, so the mock path never
+  // pays for it. `wasm-pack build --target web` in sender/core produces it.
+  const mod = (await import("../../../core/pkg/emco_sender_core.js")) as unknown as WasmModule;
   if (typeof mod.default === "function") {
     await mod.default(); // web-target init: fetch + instantiate the .wasm
   }

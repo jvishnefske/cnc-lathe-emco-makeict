@@ -1,9 +1,9 @@
-# Sat Sep 05 06:50:16 UTC 2026
+# Sat Sep 05 06:59:03 UTC 2026
 #
 # This file:    ./emco-pcturn50_cmds.hal
 # Created by:   /usr/share/linuxcnc/hallib/basic_sim.tcl
 # With options: -no_use_hal_manualtoolchange
-# From inifile: /config/emco-pcturn50.ini
+# From inifile: /repo/linuxcnc/sim/emco-pcturn50/emco-pcturn50.ini
 # Halfiles:     {LIB:basic_sim.tcl -no_use_hal_manualtoolchange} turret.hal
 #
 # This file contains the hal commands produced by basic_sim.tcl

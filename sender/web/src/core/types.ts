@@ -103,22 +103,30 @@ export type FaultKind = "estop" | "limit_x" | "limit_z" | "turret_jam";
 export type MachineProfile = {
   name: string;
   xMinMm: number;
-  xMaxMm: number; // radius
+  xMaxMm: number; // radius; real machine 0 .. 48
   zMinMm: number;
-  zMaxMm: number;
-  rapidMmMin: number;
-  maxFeedMmMin: number;
+  zMaxMm: number; // real machine 228 usable (275 mechanical)
+  rapidMmMin: number; // 750
+  maxFeedMmMin: number; // 750 normal, 1500 absolute max
+  resolutionMm: number; // 0.001
   accelMmSec2: number;
   spindleMinRpm: number;
-  spindleMaxRpm: number;
-  turretStations: number;
+  spindleMaxRpm: number; // 130 .. 3000
+  /** Belt positions; changed by physically moving a belt, so operator-declared. */
+  spindleBeltSteps: { minRpm: number; maxRpm: number }[];
+  threadingMaxRpm: number; // 400
+  turretStations: number; // 6 — three external, three internal. NOT 8.
   turretIndexSeconds: number;
-  serial: {
+  hasEndOfTravelLimits: boolean; // false — travel ends at mechanical stops
+  requiresReferenceAfterPowerOn: boolean; // true — no absolute position memory
+  /**
+   * The physical PC link. The machine's DB9 (X300) is an RS-485 multidrop
+   * bus (pin 2 GND, 3 DATA−, 8 DATA+), NOT RS-232, and its wire framing is
+   * not yet characterised — baud is a placeholder.
+   */
+  link: {
+    kind: "rs485";
     baud: number;
-    dataBits: 7 | 8;
-    stopBits: 1 | 2;
-    parity: "none" | "even" | "odd";
-    flowControl: "none" | "hardware";
   };
-  dialect: "ac95" | "plain-gcode";
+  dialect: "emco" | "plain-gcode"; // see docs/30-serial-protocol.md
 };

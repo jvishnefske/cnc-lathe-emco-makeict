@@ -7,32 +7,44 @@ clock** — the TypeScript UI (`sender/web`) feeds it bytes and timestamps and
 renders what comes out. The contract between the two sides is
 [`sender/INTERFACE.md`](../INTERFACE.md).
 
-> **The AC95 wire protocol is UNVERIFIED.** Everything this crate assumes
-> about framing, acknowledgement, flow control and error text is a community
-> best guess, kept behind the `Dialect` trait and marked with
-> `TODO(protocol)` / "UNVERIFIED" comments. Real findings land in
-> `docs/30-serial-protocol.md` and get folded into the `Ac95` dialect one
-> seam at a time. The same goes for every number in the default machine
-> profile (travels, rapids, accel, spindle range): placeholders until someone
-> measures the actual lathe.
+> **The real machine's wire protocol is UNKNOWN.** The PC link is **RS-485**
+> (control-box connector `X300`: pin 2 GND, pin 3 DATA−, pin 8 DATA+), driven
+> on the original DOS PC by a proprietary memory-mapped ISA card
+> (`Y4A013000`) — **not a UART** — so there is no known byte-stream framing
+> at all. There is also no "AC95" board in this machine; the brain is the
+> axis-controller / CPU board `Y4A012000`. Consequences here:
+> `PlainGcode` is a **development and training fiction** spoken by the
+> `VirtualMachine`, and `EmcoStub` is an explicit stub with `TODO(protocol)`
+> seams awaiting discovery findings (`docs/30-serial-protocol.md`). All
+> framing assumptions live behind the `Dialect` trait; none leak into
+> `Session`, the geometry, or the public state types.
+> See `docs/_machine-facts.md` for the consolidated machine facts.
+
+The default `MachineProfile` carries the real numbers from EMCO's manuals
+(X 0–48 mm radius, Z 0 to −228 mm with the reference at X48/Z0, rapid
+750 mm/min, feed 0–750 mm/min, 0.001 mm resolution, spindle 130–3000 rpm in
+three belt steps, threading ≤400 rpm, 6-station turret). They are documented
+but **not re-measured at the machine**; acceleration and turret index time
+are genuinely UNVERIFIED guesses.
 
 ## Module map
 
 | Module | What it owns |
 |---|---|
-| `gcode` | Lexer + modal interpreter for the Fanuc-0T-style subset: word-address blocks, `/` block skip, `( )` and `;` comments, motion group, G20/G21, G90/G91, G94/G95, diameter/radius mode (G07/G08, **diameter is the default**), G54–G59, `T`/`S`/`M03..M05`/coolant/`M30`. Problems become `Diagnostic`s; parsing never panics and never stops at a bad line. **X is radius internally**; diameter programs are converted during interpretation. |
-| `geom` | Turns blocks into backplot `Segment`s (rapid/feed/arc/thread), with arcs in both I/K and R form (negative R = major arc; full circles rejected), G33 as a thread move, G76 simplified to a single thread pass (warned). Bounds include exact arc extrema, not just endpoints. |
-| `dialect` | The `Dialect` trait plus `PlainGcode` (CR-terminated lines, `ok`/`error`/`alarm:` lines or raw ACK/NAK bytes, XON/XOFF + hardware-CTS gating, one block outstanding) and `Ac95` (currently a delegating wrapper with `TODO(protocol)` seams). |
-| `machine` | `VirtualMachine`: consumes the same bytes as the real control, moves X/Z with trapezoidal velocity profiles under the profile's rapid/feed/accel limits, indexes a turret with a delay, tracks the spindle, enforces soft limits (including arc sweep extents), and emits alarms. `inject_fault("estop" \| "limit_x" \| "limit_z" \| "turret_jam")` for training scenarios. |
-| `session` | `Session`: the run state machine (`disconnected`/`idle`/`running`/`hold`/`alarm`/`homing`/`toolchange`), block queueing gated on `Dialect::wants_next_block`, current-line tracking, predicted DRO, jog/MDI/single-block/dry-run commands, and `Event` emission. `tick(now_ms, rx)` is the only pump; time always comes from the caller. |
-| `profile` | `MachineProfile` (de)serialization and the **UNVERIFIED** PC Turn 50 default. |
+| `gcode` | Lexer + modal interpreter for the Fanuc-0T-style subset: word-address blocks, `/` block skip, `( )` and `;` comments, motion group, G20/G21, G90/G91, G94/G95, diameter/radius mode (G07/G08, **diameter is the default**), G54–G59, `T`/`S`/`M03..M05`/coolant/`M30`. Problems become `Diagnostic`s; parsing never panics and never stops at a bad line. **X is radius internally**; diameter programs are converted during interpretation. Warns when threading above the 400 rpm sync limit. |
+| `geom` | Turns blocks into backplot `Segment`s (rapid/feed/arc/thread), with arcs in both I/K and R form (negative R = major arc; full circles rejected), G33 as a thread move, G76/G78 threading cycles simplified to a single thread pass (warned). Bounds include exact arc extrema, not just endpoints. |
+| `dialect` | The `Dialect` trait plus `PlainGcode` (the development fiction: CR-terminated lines, `ok`/`error`/`alarm:` lines or raw ACK/NAK bytes, XON/XOFF + CTS gating, one block outstanding) and `EmcoStub` (the real machine's dialect — an explicit stub delegating to `PlainGcode` until protocol discovery lands). |
+| `machine` | `VirtualMachine`: consumes the development byte protocol and behaves like the real control. **Starts un-referenced** (no absolute position memory); homing references off the simulated per-axis sensors at X48/Z0. **No end-of-travel limit switches by default**: overtravel pins the slide at the mechanical stop while the control counts on — a silent stall with lost position — until re-referenced. Set `hasEndOfTravelLimits: true` (retrofit) for clean soft-limit rejection instead. Trapezoidal velocity profiles, turret index delay, spindle state, threading rejected above `threadingMaxRpm` (alarm 8010). `inject_fault("estop" \| "limit_x" \| "limit_z" \| "turret_jam")` for training scenarios. |
+| `session` | `Session`: the run state machine (`disconnected`/`idle`/`running`/`hold`/`alarm`/`homing`/`toolchange`), block queueing gated on `Dialect::wants_next_block`, current-line tracking, predicted DRO, jog/MDI/single-block/dry-run commands, `Event` emission. Includes a **sender-side soft-limit net**: a move whose swept extent leaves the profile travel is never transmitted (the machine itself has no limit switches to catch it). `tick(now_ms, rx)` is the only pump; time always comes from the caller. |
+| `profile` | `MachineProfile` (de)serialization with the documented PC Turn 50 defaults, `spindleBeltSteps` (operator-declared — belts are moved by hand), `link: {kind: "rs485", baud}`. |
 | `wasm` | Thin `wasm-bindgen` wrappers (`Program`, `VirtualMachine`, `Session`), compiled only on `wasm32` targets. |
 
 Because the wire protocol has no confirmed position feedback, the session's
 DRO is a *prediction*: it interprets each block it sends with the same modal
 machinery as the parser, interpolates along the in-flight move, and snaps to
 the block's target on acknowledgement. The `VirtualMachine` keeps its own
-ground truth, and the end-to-end tests assert the two agree.
+ground truth — including believed-vs-physical divergence after a stall — and
+the end-to-end tests assert the two agree on clean runs.
 
 ## Testing
 
@@ -43,7 +55,7 @@ cargo test
 That is the whole story — native, no browser, no wasm toolchain, no nix. The
 suite covers the lexer (including malformed input), modal transitions,
 diameter-vs-radius handling, arc geometry and bounds, dialect framing and
-flow control, the virtual machine's motion/turret/fault behaviour, the
+flow control, the virtual machine's motion/turret/stall/fault behaviour, the
 session state machine, and an end-to-end run of a demo program through
 `Session` + `VirtualMachine` in a lockstep loop.
 
@@ -75,8 +87,9 @@ is gated on `target_arch = "wasm32"`, so native builds never touch it.
   `valueMm` afterwards).
 - `Event::raw` carries bytes as a plain number array over the JS boundary,
   not a `Uint8Array`.
-- `Session.set_cts(bool)` is an extra export so the UI can report the
-  hardware CTS line when the transport exposes it.
+- `Session.set_cts(bool)` is an extra export so the UI can report a CTS
+  line if a transport has one (the fiction dialect uses it; the real RS-485
+  link has no such signal).
 
 ## Safety
 

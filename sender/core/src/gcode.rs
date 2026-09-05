@@ -292,6 +292,7 @@ pub struct ModalState {
     /// Emitted the "feed with no F" warning already (once per program).
     warned_no_feed: bool,
     warned_no_rpm: bool,
+    warned_thread_rpm: bool,
 }
 
 impl Default for ModalState {
@@ -315,6 +316,7 @@ impl Default for ModalState {
             ended: false,
             warned_no_feed: false,
             warned_no_rpm: false,
+            warned_thread_rpm: false,
         }
     }
 }
@@ -372,7 +374,7 @@ impl ModalState {
 
         // --- Non-motion G codes first (units affect coordinates in the same block).
         let mut motion_g: Option<MotionGroup> = None;
-        let mut g76 = false;
+        let mut g76 = false; // set for the G76/G78 threading cycles
         for g in block.all('G') {
             let gi = (g * 10.0).round() as i64; // G84.5-safe integer form (x10)
             match gi {
@@ -392,7 +394,7 @@ impl ModalState {
                 330 => motion_g = Some(MotionGroup::Thread),
                 400 | 410 | 420 => {} // tool nose comp: accepted, not modeled (warned once below)
                 540..=590 if gi % 10 == 0 => self.work_offset = (gi / 10) as u8,
-                760 => g76 = true,
+                760 | 780 => g76 = true, // G76/G78: two-block threading cycle
                 900 => self.distance = Distance::Absolute,
                 910 => self.distance = Distance::Incremental,
                 940 => self.feed_mode = FeedMode::UnitsPerMin,
@@ -471,15 +473,17 @@ impl ModalState {
         }
         let has_coords = block.has_any_of(&['X', 'Z', 'U', 'W']);
         if g76 {
-            // TODO(protocol/geometry): Fanuc-0T G76 is a two-block multi-pass
-            // threading cycle. We model only the programmed X/Z endpoint as a
-            // single thread pass so the backplot shows *something* sensible.
+            // The control's threading cycles (G76 / G78 - the EMCO manual
+            // documents the G78 two-block format) are multi-pass. We model
+            // only the programmed X/Z endpoint as a single thread pass so the
+            // backplot shows *something* sensible.
             if has_coords {
                 diags.push(Diagnostic::warning(
                     line,
                     0,
-                    "G76 threading cycle simplified to a single thread pass",
+                    "threading cycle simplified to a single thread pass",
                 ));
+                self.warn_thread_rpm(line, diags);
                 let (x1, z1) = self.resolve_target(block);
                 fx.motion = Some(MotionCmd {
                     kind: MoveKind::Thread,
@@ -495,7 +499,7 @@ impl ModalState {
                 diags.push(Diagnostic::warning(
                     line,
                     0,
-                    "G76 parameter block ignored (threading cycle not modeled)",
+                    "threading cycle parameter block ignored (cycle not modeled)",
                 ));
             }
             return fx;
@@ -512,6 +516,9 @@ impl ModalState {
                 fx.motion = Some(MotionCmd { kind: MoveKind::Rapid, x0, z0, x1, z1, feed_mm_min: 0.0 });
             }
             MotionGroup::Linear | MotionGroup::Thread => {
+                if self.motion == MotionGroup::Thread {
+                    self.warn_thread_rpm(line, diags);
+                }
                 let feed = self.checked_feed(line, diags);
                 let kind = if self.motion == MotionGroup::Thread { MoveKind::Thread } else { MoveKind::Feed };
                 fx.motion = Some(MotionCmd { kind, x0, z0, x1, z1, feed_mm_min: feed });
@@ -540,6 +547,24 @@ impl ModalState {
         self.x = x1;
         self.z = z1;
         fx
+    }
+
+    /// PC Turn 50: the spindle encoder synchronises threading only up to
+    /// 400 rpm (EMCO manual; alarm 8010 above that). The parser has no
+    /// machine profile, so the documented manual value is used here; the
+    /// simulator enforces the profile's `threading_max_rpm` at run time.
+    fn warn_thread_rpm(&mut self, line: u32, diags: &mut Vec<Diagnostic>) {
+        const THREADING_MAX_RPM: f64 = 400.0;
+        if self.spindle_rpm > THREADING_MAX_RPM && !self.warned_thread_rpm {
+            self.warned_thread_rpm = true;
+            diags.push(Diagnostic::warning(
+                line,
+                0,
+                format!(
+                    "threading above {THREADING_MAX_RPM:.0} rpm exceeds the spindle sync limit                      (machine alarm 8010)"
+                ),
+            ));
+        }
     }
 
     fn checked_feed(&mut self, line: u32, diags: &mut Vec<Diagnostic>) -> f64 {
@@ -986,6 +1011,24 @@ mod tests {
     fn ik_radius_mismatch_warns() {
         let p = Program::parse("G8 G94 F100\nG0 X0 Z0\nG2 X10 Z-10 I10 K0.5");
         assert!(p.diagnostics.iter().any(|d| d.message.contains("radius differs")));
+    }
+
+    #[test]
+    fn g78_cycle_treated_like_g76() {
+        let p = Program::parse("G8\nG0 X8 Z2\nG78 X7.0 Z-15 F1.0");
+        assert!(p.diagnostics.iter().any(|d| d.message.contains("single thread pass")));
+    }
+
+    #[test]
+    fn threading_above_400_rpm_warns() {
+        let p = Program::parse("G8 S1000 M3\nG0 X5 Z2\nG33 Z-10 F1");
+        assert!(
+            p.diagnostics.iter().any(|d| d.message.contains("8010")),
+            "{:?}",
+            p.diagnostics
+        );
+        let p = Program::parse("G8 S300 M3\nG0 X5 Z2\nG33 Z-10 F1");
+        assert!(!p.diagnostics.iter().any(|d| d.message.contains("8010")));
     }
 
     #[test]

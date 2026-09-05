@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""send.py — headless G-code sender for the EMCO PC Turn 50 (AC95 box).
+"""send.py — headless G-code sender for the EMCO PC Turn 50 toolchain.
 
-Streams a G-code file to a serial port (or to the pty printed by
-tools/virtual-ac95.py) using the "PlainGcode" dialect from
+Streams a G-code file to a serial port (normally the pty printed by
+tools/virtual-emco.py) using the "PlainGcode" dialect from
 sender/INTERFACE.md: one CR-terminated line at a time, waiting for the
 machine's "ok" before sending the next, and honouring XON/XOFF (and,
 on a real port, CTS) flow control.
+
+NOTE: this dialect is a development and training fiction. The real
+machine's DB9 is an RS-485 bus with an unknown, non-text protocol
+(docs/30-serial-protocol.md) — do NOT point this tool at the real lathe
+expecting it to work; today its targets are the virtual machine and any
+future device that adopts the dialect.
 
     python3 sender/cli/send.py --port /dev/ttyUSB0 part.ngc
     python3 sender/cli/send.py --port /dev/pts/7 --single-block part.ngc
@@ -107,7 +113,7 @@ def open_transport(args):
     if HAVE_PYSERIAL:
         return PyserialTransport(args)
     print("note: pyserial not installed — using stdlib pty fallback.")
-    print("      This is fine for tools/virtual-ac95.py ptys. For a REAL")
+    print("      This is fine for tools/virtual-emco.py ptys. For a REAL")
     print("      serial port, run inside `nix develop` (from the repo root)")
     print("      or `pip install pyserial` first.")
     return TermiosTransport(args)
@@ -309,14 +315,14 @@ def main():
                     "a file line-by-line with ack ('ok') pacing and XON/XOFF "
                     "flow control. Fallback for when a Web Serial browser is "
                     "not available; also the standard way to drive "
-                    "tools/virtual-ac95.py.",
+                    "tools/virtual-emco.py.",
         epilog="SAFETY: Ctrl-C sends a best-effort stop, but the only real "
                "stop is the mains switch on the control box. Stay at the "
                "machine for the entire run.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     ap.add_argument("file", help="G-code file to send")
     ap.add_argument("--port", "-p",
-                    help="serial device or virtual-ac95 pty "
+                    help="serial device or virtual-emco pty "
                          "(e.g. /dev/ttyUSB0, /dev/pts/7); required unless "
                          "--dry-run")
     ap.add_argument("--baud", "-b", type=int, default=9600,
@@ -328,9 +334,10 @@ def main():
     ap.add_argument("--stopbits", type=int, choices=(1, 2), default=1,
                     help="stop bits")
     ap.add_argument("--rtscts", action="store_true",
-                    help="enable hardware RTS/CTS flow control "
-                         "(pyserial only; community reports say the AC95 "
-                         "gates on CTS)")
+                    help="enable hardware RTS/CTS flow control (pyserial "
+                         "only; part of the PlainGcode dev dialect — the "
+                         "old 'the machine gates on CTS' community claim "
+                         "is refuted, see docs/30-serial-protocol.md)")
     ap.add_argument("--timeout", type=float, default=120.0, metavar="SEC",
                     help="max seconds to wait for a block's 'ok' (long moves "
                          "take real time)")

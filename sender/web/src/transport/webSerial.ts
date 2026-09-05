@@ -25,6 +25,18 @@ export class WebSerialTransport implements Transport {
     return this._connected;
   }
 
+  /** Human-readable name of the picked port, for the connection bar. */
+  get portLabel(): string {
+    if (!this.port) return "";
+    const info = this.port.getInfo();
+    if (info.usbVendorId !== undefined) {
+      const v = info.usbVendorId.toString(16).padStart(4, "0");
+      const p = (info.usbProductId ?? 0).toString(16).padStart(4, "0");
+      return `USB ${v}:${p}`;
+    }
+    return "Port picked";
+  }
+
   /** Must be called from a user gesture; shows the browser's port picker. */
   async pickPort(): Promise<void> {
     if (!navigator.serial) {

@@ -1,10 +1,13 @@
 //! Wire-protocol dialects.
 //!
-//! **The AC95 wire protocol is NOT confirmed.** Everything here about framing,
-//! handshaking, acknowledgement and error text is an assumption to be replaced
-//! by real findings in `docs/30-serial-protocol.md`. All assumptions live
-//! behind the [`Dialect`] trait so that swapping them out never touches the
-//! UI, the backplot, or `Session`'s state machine.
+//! **The real machine's protocol is UNKNOWN.** The PC link is RS-485
+//! (control-box connector `X300`: pin 2 GND, pin 3 DATA-, pin 8 DATA+),
+//! driven on the original DOS PC by a proprietary memory-mapped ISA card
+//! (`Y4A013000`, 4 KB dual-port RAM at CC000-CFFFF) - **not a UART**. There
+//! is therefore no known byte-stream framing at all; see
+//! `docs/_machine-facts.md` and `docs/30-serial-protocol.md`. Every framing
+//! assumption lives behind the [`Dialect`] trait so that swapping it out
+//! never touches the UI, the backplot, or `Session`'s state machine.
 
 use crate::gcode::Block;
 
@@ -30,7 +33,7 @@ pub enum DialectEvent {
 /// The three contract methods are here verbatim. The extra methods
 /// (`note_block_sent`, `set_cts`, `control_bytes`, `reset`) are additions the
 /// core needs to drive flow control and realtime actions; they are part of the
-/// trait so a corrected AC95 implementation can override them.
+/// trait so a corrected real-machine implementation can override them.
 pub trait Dialect {
     /// Frame one block for the wire.
     fn encode_block(&self, block: &Block) -> Vec<u8>;
@@ -72,11 +75,16 @@ pub enum ControlAction {
 // PlainGcode
 // ---------------------------------------------------------------------------
 
-/// Line-oriented plain G-code dialect: the community's best guess at how the
-/// AC95 link behaves, and the dialect the [`crate::machine::VirtualMachine`]
-/// speaks natively.
+/// Line-oriented plain G-code dialect.
 ///
-/// Framing (each item UNVERIFIED for the real AC95):
+/// **This is a development and training fiction, not the machine protocol.**
+/// The real PC Turn 50 link is RS-485 driven by a memory-mapped ISA card with
+/// no known byte-stream framing, so nothing below describes the real machine.
+/// `PlainGcode` exists so the [`crate::machine::VirtualMachine`] (which
+/// speaks it natively), the tests and the UI are all exercisable today, and
+/// so retrofit controllers with a text protocol have something to talk to.
+///
+/// Framing (of the fiction):
 /// - Blocks are sent as ASCII text terminated by CR (`\r`).
 /// - The machine acknowledges each block with a line starting with `ok`
 ///   (case-insensitive) or a bare ACK byte (0x06).
@@ -143,7 +151,7 @@ impl Default for PlainGcode {
 impl Dialect for PlainGcode {
     fn encode_block(&self, block: &Block) -> Vec<u8> {
         // Comments and redundant whitespace were stripped by the lexer; send
-        // the cleaned word text, CR terminated (UNVERIFIED terminator for AC95).
+        // the cleaned word text, CR terminated (a fiction; see the type docs).
         let mut v = block.clean.as_bytes().to_vec();
         v.push(b'\r');
         v
@@ -229,47 +237,53 @@ impl Dialect for PlainGcode {
 }
 
 // ---------------------------------------------------------------------------
-// Ac95
+// EmcoStub
 // ---------------------------------------------------------------------------
 
-/// The EMCO AC95 dialect.
+/// The real EMCO PC Turn 50 dialect - an explicit stub.
 ///
-/// **Every behaviour in here is UNVERIFIED.** Until `docs/30-serial-protocol.md`
-/// lands real findings, this is a thin wrapper over [`PlainGcode`] with marked
-/// seams where corrections go. Keep the delegation structure: correct one seam
-/// at a time as facts arrive.
-pub struct Ac95 {
+/// There is no "AC95" board in this machine (that part number, `Y4B081000`,
+/// is community lore for a different EMCO model); the brain is the axis
+/// controller / CPU board `Y4A012000` (+ `Y4A015000`), reached over RS-485
+/// from a memory-mapped ISA card. **No byte-stream protocol is known**, so
+/// every behaviour in here is a placeholder delegating to [`PlainGcode`],
+/// with `TODO(protocol)` seams where discovery findings from
+/// `docs/30-serial-protocol.md` will land. Correct one seam at a time as
+/// facts arrive; never let an assumption in here leak past the `Dialect`
+/// trait.
+pub struct EmcoStub {
     inner: PlainGcode,
 }
 
-impl Ac95 {
-    pub fn new() -> Ac95 {
-        Ac95 { inner: PlainGcode::new() }
+impl EmcoStub {
+    pub fn new() -> EmcoStub {
+        EmcoStub { inner: PlainGcode::new() }
     }
 }
 
-impl Default for Ac95 {
+impl Default for EmcoStub {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Dialect for Ac95 {
+impl Dialect for EmcoStub {
     fn encode_block(&self, block: &Block) -> Vec<u8> {
-        // TODO(protocol): confirm block framing. Candidates seen in EMCO-era
-        // gear: CR, CRLF, or a leading STX/length byte. Currently assumes CR.
+        // TODO(protocol): the real framing is completely unknown (the wire is
+        // RS-485 fed by a dual-port-RAM ISA card, not a UART). CR-terminated
+        // text below is a placeholder inherited from PlainGcode.
         self.inner.encode_block(block)
     }
 
     fn feed_rx(&mut self, bytes: &[u8]) -> Vec<DialectEvent> {
-        // TODO(protocol): confirm ack/nak vocabulary and alarm text format.
-        // Currently assumes the PlainGcode rules documented above.
+        // TODO(protocol): ack/nak vocabulary and alarm format unknown.
+        // Currently assumes the PlainGcode fiction documented above.
         self.inner.feed_rx(bytes)
     }
 
     fn wants_next_block(&self) -> bool {
-        // TODO(protocol): confirm window size (blocks outstanding) and whether
-        // the AC95 uses XON/XOFF at all or only hardware CTS.
+        // TODO(protocol): flow-control model unknown (window size, pacing).
+        // XON/XOFF + CTS below is the PlainGcode fiction.
         self.inner.wants_next_block()
     }
 
@@ -282,8 +296,8 @@ impl Dialect for Ac95 {
     }
 
     fn control_bytes(&self, action: ControlAction) -> Vec<u8> {
-        // TODO(protocol): confirm whether the AC95 has any realtime stop or
-        // hold bytes. Until then, PlainGcode's placeholders are used.
+        // TODO(protocol): no realtime stop/hold bytes are known for the real
+        // control. Until then, PlainGcode's placeholders are used.
         self.inner.control_bytes(action)
     }
 
@@ -295,7 +309,7 @@ impl Dialect for Ac95 {
 /// Construct the dialect selected by a profile.
 pub fn make_dialect(kind: crate::profile::DialectKind) -> Box<dyn Dialect> {
     match kind {
-        crate::profile::DialectKind::Ac95 => Box::new(Ac95::new()),
+        crate::profile::DialectKind::Emco => Box::new(EmcoStub::new()),
         crate::profile::DialectKind::PlainGcode => Box::new(PlainGcode::new()),
     }
 }
@@ -397,8 +411,8 @@ mod tests {
     #[test]
     fn unknown_chatter_becomes_text_events() {
         let mut d = PlainGcode::new();
-        let ev = d.feed_rx(b"EMCO AC95 V1.2\r\n");
-        assert_eq!(ev, vec![DialectEvent::Text("EMCO AC95 V1.2".to_string())]);
+        let ev = d.feed_rx(b"EMCO PC TURN 50 READY\r\n");
+        assert_eq!(ev, vec![DialectEvent::Text("EMCO PC TURN 50 READY".to_string())]);
     }
 
     #[test]
@@ -415,8 +429,8 @@ mod tests {
     }
 
     #[test]
-    fn ac95_delegates_to_plain_for_now() {
-        let mut a = Ac95::new();
+    fn emco_stub_delegates_to_plain_for_now() {
+        let mut a = EmcoStub::new();
         let b = block("G1 X5 F0.1");
         assert_eq!(a.encode_block(&b), PlainGcode::new().encode_block(&b));
         a.note_block_sent();

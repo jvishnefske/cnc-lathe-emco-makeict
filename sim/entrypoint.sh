@@ -3,10 +3,10 @@
 # with noVNC, then launch LinuxCNC with the PC Turn 50 simulator config.
 set -euo pipefail
 
-CONFIG="${LINUXCNC_CONFIG:-/config/emco-pcturn50.ini}"
+CONFIG="${LINUXCNC_CONFIG:-/repo/linuxcnc/sim/emco-pcturn50/emco-pcturn50.ini}"
 
 if [[ ! -f "$CONFIG" ]]; then
-    echo "No config at $CONFIG — is linuxcnc/sim/emco-pcturn50 bind-mounted?" >&2
+    echo "No config at $CONFIG — is the repository bind-mounted at /repo?" >&2
     exit 1
 fi
 

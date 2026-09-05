@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Unit tests for the VirtualAC95 simulation core.
+"""Unit tests for the VirtualEmco simulation core.
 
 Run with no hardware, no pty and no pyserial:
 
-    python3 tools/test_virtual_ac95.py         # or: python3 -m unittest
+    python3 tools/test_virtual_emco.py         # or: python3 -m unittest
 """
 
 import importlib.util
@@ -12,20 +12,20 @@ import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _spec = importlib.util.spec_from_file_location(
-    "virtual_ac95", os.path.join(_HERE, "virtual-ac95.py"))
-virtual_ac95 = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(virtual_ac95)
+    "virtual_emco", os.path.join(_HERE, "virtual-emco.py"))
+virtual_emco = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(virtual_emco)
 
-VirtualAC95 = virtual_ac95.VirtualAC95
-XON = virtual_ac95.XON
-XOFF = virtual_ac95.XOFF
+VirtualEmco = virtual_emco.VirtualEmco
+XON = virtual_emco.XON
+XOFF = virtual_emco.XOFF
 
 
 class Harness(unittest.TestCase):
     """Drives the core with a fake clock; collects all output."""
 
     def setUp(self):
-        self.vm = VirtualAC95(now_ms=0.0)
+        self.vm = VirtualEmco(now_ms=0.0)
         self.out = self.vm.step(0.0)  # banner + initial XON
 
     def send(self, text, at_ms):
@@ -215,7 +215,7 @@ class TestFlowControlAndAlarms(Harness):
     def test_abort_stops_motion_at_interpolated_position(self):
         self.send("G0 X10\r", 0)           # 800 ms
         self.send("\x18", 400)             # abort halfway
-        self.assertEqual(self.vm.state, virtual_ac95.IDLE)
+        self.assertEqual(self.vm.state, virtual_emco.IDLE)
         self.assertAlmostEqual(self.vm.x, 5.0, delta=0.1)
         got = self.tick(1000)
         self.assertNotIn(b"ok", got, "aborted move must not ack")

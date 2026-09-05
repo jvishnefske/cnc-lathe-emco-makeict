@@ -20,7 +20,12 @@
 (  ===================================================================  )
 
 G21 G18 G40 G90 G95 G7
-G53 G0 X48
+
+(  A TRAP WORTH KNOWING: diameter mode G7 applies to G53 machine moves too. )
+(  The machine has 48 mm of X travel as a RADIUS, so the fully retracted      )
+(  position is X96 in diameter mode, not X48. Writing X48 here would retract  )
+(  only half way and leave the turret sitting over the work.                  )
+G53 G0 X96
 
 T1 M6
 G54
@@ -61,7 +66,7 @@ G1 X0.5 F0.04
 G0 X16
 
 M5
-G53 G0 X48 Z0
+G53 G0 X96 Z0
 M30
 
 (  ===================================================================  )

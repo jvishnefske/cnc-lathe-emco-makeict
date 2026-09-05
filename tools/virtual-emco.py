@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""virtual-ac95.py — a simulated EMCO PC Turn 50 control box on a pty.
+"""virtual-emco.py — a simulated EMCO PC Turn 50 control box on a pty.
 
 WHAT THIS IS (and is not): this simulator speaks the project's "PlainGcode"
 dialect from sender/INTERFACE.md — line-oriented ASCII G-code with XON/XOFF
-pacing. That dialect is a WORKING FICTION for developing and training with
-the sender toolchain. It is explicitly NOT the real machine protocol: per
-docs/_machine-facts.md, the real DB9 (bulkhead X300) is an RS-485 bus
-driven by a memory-mapped ISA card (Y4A013000 "PCCOM"), the wire protocol
-is unknown, and it is not line-oriented text. ("AC95" in the filename is
-the community's historical name for the control brain; the actual CPU
-board is Y4A012000. The filename is kept for continuity with
-sender/INTERFACE.md's `Ac95` dialect stub.)
+pacing. That dialect is a DEVELOPMENT AND TRAINING FICTION for the sender
+toolchain, NOT the real machine protocol. Per docs/_machine-facts.md, the
+real DB9 (bulkhead X300) is an RS-485 bus driven by a memory-mapped ISA
+card (Y4A013000 "PCCOM"), the wire protocol is unknown, and it is not
+line-oriented text. Nothing learned from this simulator transfers to the
+real wire; what DOES transfer is the machine model below (travels, turret,
+stalls, referencing), which teaches the real lathe's habits.
+(Historical note: this file was born "virtual-ac95.py" after the
+community's name for the brain board; the actual CPU board is Y4A012000
+and no "AC95" exists in this machine.)
 
 Dialect summary:
   * CR (or LF) terminated ASCII G-code lines
@@ -46,7 +48,7 @@ Honest limit/homing model, matching the real machine:
     reference must be re-acquired after EVERY power-off. Here: the
     machine starts UNREFERENCED, `G28` runs the reference sequence, and
     a simulated power cycle (SIGUSR1 to this process, or
-    VirtualAC95.power_cycle()) invalidates the reference again.
+    VirtualEmco.power_cycle()) invalidates the reference again.
   * Soft limits are a SIMULATION SAFETY NET doing a job the real
     hardware does not do. They are active only while referenced (an
     unreferenced control cannot know where the stops are — that is the
@@ -56,12 +58,12 @@ Honest limit/homing model, matching the real machine:
 Stdlib only — no pyserial needed. Point the sender (or picocom) at the
 pty path printed on startup:
 
-    python3 tools/virtual-ac95.py
+    python3 tools/virtual-emco.py
     # ... pty: /dev/pts/7
     python3 sender/cli/send.py --port /dev/pts/7 gcode/part.ngc
 
-The simulation core (class VirtualAC95) is I/O-free and clock-injected,
-so tools/test_virtual_ac95.py exercises it with no hardware and no pty.
+The simulation core (class VirtualEmco) is I/O-free and clock-injected,
+so tools/test_virtual_emco.py exercises it with no hardware and no pty.
 """
 
 import argparse
@@ -114,7 +116,7 @@ IDLE, RUN, DWELL, TOOLCHANGE, HOMING, HOLD, ALARM = (
     "Idle", "Run", "Dwell", "Toolchange", "Homing", "Hold", "Alarm")
 
 
-class VirtualAC95:
+class VirtualEmco:
     """Pure simulation core. Feed it host bytes and a clock; it returns the
     bytes the machine would emit. No I/O, no real time.
 
@@ -573,7 +575,7 @@ def run_pty(args):
             transcript.write(line + "\n")
             transcript.flush()
 
-    vm = VirtualAC95(now_ms=time.monotonic() * 1000.0)
+    vm = VirtualEmco(now_ms=time.monotonic() * 1000.0)
     if args.start_referenced:
         vm.referenced = True
         vm.x, vm.z = vm.true_x, vm.true_z

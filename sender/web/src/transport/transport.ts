@@ -4,9 +4,27 @@
  * LoopbackTransport (the core's VirtualMachine, no hardware).
  */
 
-import type { MachineProfile } from "../core/types";
+/**
+ * UART settings for a USB-RS485 adapter. These are a transport-side concern:
+ * the machine profile only records that the link is RS-485 with an unknown
+ * framing (MachineProfile.link), so the concrete UART parameters live here
+ * and are adjustable in the connection bar for protocol discovery.
+ */
+export type SerialSettings = {
+  baud: number;
+  dataBits: 7 | 8;
+  stopBits: 1 | 2;
+  parity: "none" | "even" | "odd";
+  flowControl: "none" | "hardware";
+};
 
-export type SerialSettings = MachineProfile["serial"];
+export const DEFAULT_SERIAL_SETTINGS: SerialSettings = {
+  baud: 9600, // UNVERIFIED — the RS-485 wire framing is not yet characterised
+  dataBits: 8,
+  stopBits: 1,
+  parity: "none",
+  flowControl: "none",
+};
 
 export interface Transport {
   readonly kind: "webserial" | "loopback";

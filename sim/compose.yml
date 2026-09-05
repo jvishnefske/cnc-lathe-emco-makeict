@@ -3,8 +3,10 @@
 #   docker compose -f sim/compose.yml up
 #   then open http://localhost:8080/vnc.html?autoconnect=1&resize=scale
 #
-# The config and the example programs are bind-mounted, so editing them on the
-# host takes effect on the next restart — no rebuild needed.
+# The whole repository is mounted at /repo rather than just the config
+# directory, so relative paths inside the INI (PROGRAM_PREFIX, OPEN_FILE)
+# resolve to the same place here as they do in a native checkout. Editing the
+# config or the example programs on the host takes effect on the next restart.
 services:
   linuxcnc-sim:
     build:
@@ -15,10 +17,9 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ../linuxcnc/sim/emco-pcturn50:/config:rw
-      - ../gcode:/home/cnc/gcode:rw
+      - ..:/repo:rw
     environment:
-      LINUXCNC_CONFIG: /config/emco-pcturn50.ini
+      LINUXCNC_CONFIG: /repo/linuxcnc/sim/emco-pcturn50/emco-pcturn50.ini
     shm_size: "256m"
     stdin_open: true
     tty: true

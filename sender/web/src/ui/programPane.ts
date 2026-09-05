@@ -8,6 +8,8 @@ import type { Diagnostic } from "../core/types";
 export type ProgramCallbacks = {
   onProgramText: (name: string, text: string) => void;
   onStockChange: (diameterMm: number, lengthMm: number) => void;
+  /** Load the built-in demo part (training aid). */
+  onLoadDemo?: () => void;
 };
 
 export class ProgramPane {
@@ -24,6 +26,7 @@ export class ProgramPane {
       <header class="panel-title">Program
         <span class="program-name" data-e="name">none</span>
         <button class="btn btn-small" data-e="open">Open…</button>
+        <button class="btn btn-small" data-e="demo">Demo</button>
         <input type="file" data-e="file" accept=".nc,.ngc,.gcode,.tap,.txt,.cnc,.min" hidden>
       </header>
       <div class="stock-row">
@@ -38,6 +41,7 @@ export class ProgramPane {
     this.nameEl = q("name");
     const fileInput = q<HTMLInputElement>("file");
     q("open").addEventListener("click", () => fileInput.click());
+    q("demo").addEventListener("click", () => this.cb.onLoadDemo?.());
     fileInput.addEventListener("change", () => {
       const f = fileInput.files?.[0];
       if (f) void this.readFile(f);

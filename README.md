@@ -88,6 +88,8 @@ docker compose -f sim/compose.yml up
 cd sender/web && npm ci && npm run dev
 ```
 
+![The browser sender, running a program against the simulated machine](docs/img/sender-ui-running.jpg)
+
 The sender needs **Chrome or Edge** — it uses the Web Serial API, which Firefox and Safari do not
 implement. Reaching the real machine would additionally need a **USB-RS485** adapter; a USB-RS232
 cable is the wrong electrical standard for this port.

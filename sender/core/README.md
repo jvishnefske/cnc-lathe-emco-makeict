@@ -21,21 +21,33 @@ renders what comes out. The contract between the two sides is
 > See `docs/_machine-facts.md` for the consolidated machine facts.
 
 The default `MachineProfile` carries the real numbers from EMCO's manuals
-(X 0–48 mm radius, Z 0 to −228 mm with the reference at X48/Z0, rapid
-750 mm/min, feed 0–750 mm/min, 0.001 mm resolution, spindle 130–3000 rpm in
-three belt steps, threading ≤400 rpm, 6-station turret). They are documented
-but **not re-measured at the machine**; acceleration and turret index time
-are genuinely UNVERIFIED guesses.
+(48 mm of X travel as a **radius**, 228 mm of Z travel running negative from
+the reference at X48/Z0, rapid 750 mm/min, feed 0–750 mm/min, 0.001 mm
+resolution, spindle 130–3000 rpm in three belt steps, threading ≤400 rpm,
+6-station turret), with the same ±0.5 mm working margins as the LinuxCNC
+simulator config (`linuxcnc/sim/emco-pcturn50/`). They are documented but
+**not re-measured at the machine**; acceleration and turret index time are
+genuinely UNVERIFIED guesses.
+
+**Work offsets:** both `Session` and `VirtualMachine` default G54 to
+X0 / **Z −50** — "a piece of stock whose face was touched off 50 mm in from
+the reference point" — matching the LinuxCNC sim's parameter file (var 5223),
+so the sender, the LinuxCNC sim and the example programs in `gcode/` all run
+the same files. `G53` moves are machine coordinates (and the diameter-mode
+trap applies to them too: fully retracted is `G53 X96` in diameter mode, not
+`X48`). Touch-off (`setWorkOffset`) is sent as a `G10 L2` block through the
+normal pipeline, so the machine's offset and the session's prediction always
+move together.
 
 ## Module map
 
 | Module | What it owns |
 |---|---|
-| `gcode` | Lexer + modal interpreter for the Fanuc-0T-style subset: word-address blocks, `/` block skip, `( )` and `;` comments, motion group, G20/G21, G90/G91, G94/G95, diameter/radius mode (G07/G08, **diameter is the default**), G54–G59, `T`/`S`/`M03..M05`/coolant/`M30`. Problems become `Diagnostic`s; parsing never panics and never stops at a bad line. **X is radius internally**; diameter programs are converted during interpretation. Warns when threading above the 400 rpm sync limit. |
+| `gcode` | Lexer + modal interpreter for the Fanuc-0T-style subset: word-address blocks, `/` block skip, `( )` and `;` comments, motion group, G20/G21, G90/G91, G94/G95, diameter/radius mode (G07/G08, **diameter is the default**), work offsets with `G53` machine-coordinate moves and `G10 L2` offset setting, G54–G59, `T`/`S`/`M03..M05`/coolant/`M30`. Problems become `Diagnostic`s; parsing never panics and never stops at a bad line. **X is radius internally**; diameter programs are converted during interpretation. Warns when threading above the 400 rpm sync limit. |
 | `geom` | Turns blocks into backplot `Segment`s (rapid/feed/arc/thread), with arcs in both I/K and R form (negative R = major arc; full circles rejected), G33 as a thread move, G76/G78 threading cycles simplified to a single thread pass (warned). Bounds include exact arc extrema, not just endpoints. |
 | `dialect` | The `Dialect` trait plus `PlainGcode` (the development fiction: CR-terminated lines, `ok`/`error`/`alarm:` lines or raw ACK/NAK bytes, XON/XOFF + CTS gating, one block outstanding) and `EmcoStub` (the real machine's dialect — an explicit stub delegating to `PlainGcode` until protocol discovery lands). |
 | `machine` | `VirtualMachine`: consumes the development byte protocol and behaves like the real control. **Starts un-referenced** (no absolute position memory); homing references off the simulated per-axis sensors at X48/Z0. **No end-of-travel limit switches by default**: overtravel pins the slide at the mechanical stop while the control counts on — a silent stall with lost position — until re-referenced. Set `hasEndOfTravelLimits: true` (retrofit) for clean soft-limit rejection instead. Trapezoidal velocity profiles, turret index delay, spindle state, threading rejected above `threadingMaxRpm` (alarm 8010). `inject_fault("estop" \| "limit_x" \| "limit_z" \| "turret_jam")` for training scenarios. |
-| `session` | `Session`: the run state machine (`disconnected`/`idle`/`running`/`hold`/`alarm`/`homing`/`toolchange`), block queueing gated on `Dialect::wants_next_block`, current-line tracking, predicted DRO, jog/MDI/single-block/dry-run commands, `Event` emission. Includes a **sender-side soft-limit net**: a move whose swept extent leaves the profile travel is never transmitted (the machine itself has no limit switches to catch it). `tick(now_ms, rx)` is the only pump; time always comes from the caller. |
+| `session` | `Session`: the run state machine (`disconnected`/`idle`/`running`/`hold`/`alarm`/`homing`/`toolchange`), block queueing gated on `Dialect::wants_next_block`, current-line tracking, predicted DRO, jog/MDI/single-block/dry-run commands, `Event` emission. Includes a **sender-side soft-limit net**: a move whose swept **machine-coordinate** extent (after work offsets) leaves the profile travel is never transmitted (the machine itself has no limit switches to catch it). `tick(now_ms, rx)` is the only pump; time always comes from the caller. |
 | `profile` | `MachineProfile` (de)serialization with the documented PC Turn 50 defaults, `spindleBeltSteps` (operator-declared — belts are moved by hand), `link: {kind: "rs485", baud}`. |
 | `wasm` | Thin `wasm-bindgen` wrappers (`Program`, `VirtualMachine`, `Session`), compiled only on `wasm32` targets. |
 
@@ -84,7 +96,8 @@ is gated on `target_arch = "wasm32"`, so native builds never touch it.
 - `Session` moves `disconnected → idle` on its first `tick`: to a
   transport-agnostic core, "being pumped" is what connected means.
 - `setWorkOffset` uses touch-off semantics (current position reads
-  `valueMm` afterwards).
+  `valueMm` afterwards) and is realised as a `G10 L2` block through the
+  normal send/ack pipeline, only accepted while idle.
 - `Event::raw` carries bytes as a plain number array over the JS boundary,
   not a `Uint8Array`.
 - `Session.set_cts(bool)` is an extra export so the UI can report a CTS

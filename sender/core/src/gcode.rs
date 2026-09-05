@@ -285,7 +285,13 @@ pub struct ModalState {
     pub coolant: bool,
     /// Modal feed, stored in mm per (min|rev) according to `feed_mode`.
     pub feed: f64,
-    /// Current position, radius mm / mm.
+    /// Active work offset values: the **machine** coordinate of work zero
+    /// (radius mm / mm). Programmed absolute coordinates have these added;
+    /// `G53` bypasses them for one block; `G10 L2` sets them. A single set is
+    /// tracked (the G54-G59 selector only changes the displayed group).
+    pub off_x: f64,
+    pub off_z: f64,
+    /// Current position in **machine** coordinates, radius mm / mm.
     pub x: f64,
     pub z: f64,
     pub ended: bool,
@@ -311,6 +317,8 @@ impl Default for ModalState {
             spindle: SpindleDir::Off,
             coolant: false,
             feed: 0.0,
+            off_x: 0.0,
+            off_z: 0.0,
             x: 0.0,
             z: 0.0,
             ended: false,
@@ -322,11 +330,22 @@ impl Default for ModalState {
 }
 
 impl ModalState {
+    /// Default modal state with the given work offset preset (machine
+    /// coordinates of work zero).
+    pub fn with_work_offset(off_x: f64, off_z: f64) -> ModalState {
+        ModalState { off_x, off_z, ..ModalState::default() }
+    }
+
     fn unit_factor(&self) -> f64 {
         match self.units {
             Units::Mm => 1.0,
             Units::Inch => 25.4,
         }
+    }
+
+    /// Work coordinates of the current machine position.
+    pub fn work_pos(&self) -> (f64, f64) {
+        (self.x - self.off_x, self.z - self.off_z)
     }
 
     /// Effective feed in mm/min for the current modal state.
@@ -375,11 +394,14 @@ impl ModalState {
         // --- Non-motion G codes first (units affect coordinates in the same block).
         let mut motion_g: Option<MotionGroup> = None;
         let mut g76 = false; // set for the G76/G78 threading cycles
+        let mut g53 = false; // machine coordinates for this block only
+        let mut g10 = false; // offset-setting block, never a motion
         for g in block.all('G') {
             let gi = (g * 10.0).round() as i64; // G84.5-safe integer form (x10)
             match gi {
                 0 => motion_g = Some(MotionGroup::Rapid),
                 10 => motion_g = Some(MotionGroup::Linear),
+                100 => g10 = true,
                 20 => motion_g = Some(MotionGroup::ArcCw),
                 30 => motion_g = Some(MotionGroup::ArcCcw),
                 40 => {} // dwell: no geometric effect
@@ -392,7 +414,8 @@ impl ModalState {
                 210 => self.units = Units::Mm,
                 280 => {} // reference return: handled by machine/session, not geometry
                 330 => motion_g = Some(MotionGroup::Thread),
-                400 | 410 | 420 => {} // tool nose comp: accepted, not modeled (warned once below)
+                400 | 410 | 420 => {} // tool nose comp: accepted, not modeled
+                530 => g53 = true,
                 540..=590 if gi % 10 == 0 => self.work_offset = (gi / 10) as u8,
                 760 | 780 => g76 = true, // G76/G78: two-block threading cycle
                 900 => self.distance = Distance::Absolute,
@@ -467,9 +490,41 @@ impl ModalState {
             }
         }
 
+        // --- G10 L2: set work offsets (machine coordinates of work zero).
+        // The X/Z words here are offset data, never a motion target. Diameter
+        // mode applies to the X word, exactly as it does for moves.
+        if g10 {
+            let l = block.word('L').map(|v| v.round() as i64);
+            if l == Some(2) || l.is_none() {
+                if l.is_none() {
+                    diags.push(Diagnostic::warning(
+                        line, 0, "G10 without L word; assuming L2 (set work offset)",
+                    ));
+                }
+                let xdiv = if self.diameter_mode { 2.0 } else { 1.0 };
+                if let Some(x) = block.word('X') {
+                    self.off_x = x * k / xdiv;
+                }
+                if let Some(z) = block.word('Z') {
+                    self.off_z = z * k;
+                }
+            } else {
+                diags.push(Diagnostic::warning(
+                    line, 0, format!("unsupported G10 L{} form; block ignored", l.unwrap_or(-1)),
+                ));
+            }
+            return fx;
+        }
+
         // --- Motion.
         if let Some(m) = motion_g {
             self.motion = m;
+        }
+        if g53 && self.distance == Distance::Incremental {
+            diags.push(Diagnostic::error(
+                line, 0, "G53 cannot be used in incremental mode (G91)",
+            ));
+            return fx;
         }
         let has_coords = block.has_any_of(&['X', 'Z', 'U', 'W']);
         if g76 {
@@ -484,7 +539,7 @@ impl ModalState {
                     "threading cycle simplified to a single thread pass",
                 ));
                 self.warn_thread_rpm(line, diags);
-                let (x1, z1) = self.resolve_target(block);
+                let (x1, z1) = self.resolve_target(block, g53);
                 fx.motion = Some(MotionCmd {
                     kind: MoveKind::Thread,
                     x0: self.x,
@@ -508,7 +563,7 @@ impl ModalState {
             return fx;
         }
 
-        let (x1, z1) = self.resolve_target(block);
+        let (x1, z1) = self.resolve_target(block, g53);
         let (x0, z0) = (self.x, self.z);
 
         match self.motion {
@@ -583,15 +638,21 @@ impl ModalState {
         self.feed_mm_min()
     }
 
-    /// Resolve the X/Z (or U/W incremental) target of a block into radius/mm.
-    fn resolve_target(&self, block: &Block) -> (f64, f64) {
+    /// Resolve the X/Z (or U/W incremental) target of a block into **machine**
+    /// radius/mm coordinates. Absolute words are work coordinates and get the
+    /// active offset added, unless `machine_coords` (G53) is set for the
+    /// block. Note the trap: diameter mode applies to G53 machine moves too -
+    /// fully retracted is `G53 X96` in diameter mode, because the 48 mm of X
+    /// travel is a radius.
+    fn resolve_target(&self, block: &Block, machine_coords: bool) -> (f64, f64) {
         let k = self.unit_factor();
         let xdiv = if self.diameter_mode { 2.0 } else { 1.0 };
+        let (ox, oz) = if machine_coords { (0.0, 0.0) } else { (self.off_x, self.off_z) };
         let mut x1 = self.x;
         let mut z1 = self.z;
         if let Some(x) = block.word('X') {
             x1 = match self.distance {
-                Distance::Absolute => x * k / xdiv,
+                Distance::Absolute => x * k / xdiv + ox,
                 Distance::Incremental => self.x + x * k / xdiv,
             };
         }
@@ -601,7 +662,7 @@ impl ModalState {
         }
         if let Some(z) = block.word('Z') {
             z1 = match self.distance {
-                Distance::Absolute => z * k,
+                Distance::Absolute => z * k + oz,
                 Distance::Incremental => self.z + z * k,
             };
         }
@@ -1029,6 +1090,64 @@ mod tests {
         );
         let p = Program::parse("G8 S300 M3\nG0 X5 Z2\nG33 Z-10 F1");
         assert!(!p.diagnostics.iter().any(|d| d.message.contains("8010")));
+    }
+
+    #[test]
+    fn work_offset_applies_to_absolute_moves() {
+        let mut m = ModalState { off_z: -50.0, ..ModalState::default() };
+        let mut d = Vec::new();
+        let b = lex_line("G0 X20 Z1", 0, &mut d).unwrap();
+        let mv = m.apply_block(&b, &mut d).motion.unwrap();
+        assert_eq!(mv.x1, 10.0, "X offset 0");
+        assert_eq!(mv.z1, -49.0, "work Z1 = machine -49 with G54 Z-50");
+        // Incremental words are frame-independent.
+        let b = lex_line("G0 W-1", 1, &mut d).unwrap();
+        let mv = m.apply_block(&b, &mut d).motion.unwrap();
+        assert_eq!(mv.z1, -50.0);
+        assert_eq!(m.work_pos().1, 0.0);
+    }
+
+    #[test]
+    fn g53_bypasses_offset_but_diameter_mode_still_applies() {
+        // The trap from the tutorial program: fully retracted is G53 X96 in
+        // diameter mode, because X travel is 48 mm of radius.
+        let mut m = ModalState { off_x: 5.0, off_z: -50.0, ..ModalState::default() };
+        let mut d = Vec::new();
+        let b = lex_line("G53 G0 X96 Z0", 0, &mut d).unwrap();
+        let mv = m.apply_block(&b, &mut d).motion.unwrap();
+        assert!(d.is_empty(), "{d:?}");
+        assert_eq!(mv.x1, 48.0, "X96 diameter = machine radius 48, no offset");
+        assert_eq!(mv.z1, 0.0, "machine Z0, offset bypassed");
+        // G53 is non-modal: the next absolute move uses the offset again.
+        let b = lex_line("G0 Z1", 1, &mut d).unwrap();
+        let mv = m.apply_block(&b, &mut d).motion.unwrap();
+        assert_eq!(mv.z1, -49.0);
+    }
+
+    #[test]
+    fn g53_in_incremental_mode_is_error() {
+        let mut m = ModalState::default();
+        let mut d = Vec::new();
+        let b = lex_line("G91 G53 G0 X10", 0, &mut d).unwrap();
+        let fx = m.apply_block(&b, &mut d);
+        assert!(fx.motion.is_none());
+        assert!(d.iter().any(|x| x.severity == Severity::Error && x.message.contains("G53")));
+    }
+
+    #[test]
+    fn g10_l2_sets_offsets_without_motion() {
+        let mut m = ModalState::default();
+        let mut d = Vec::new();
+        // Diameter mode applies to the G10 X word too.
+        let b = lex_line("G10 L2 P1 X4 Z-50", 0, &mut d).unwrap();
+        let fx = m.apply_block(&b, &mut d);
+        assert!(fx.motion.is_none(), "G10 X/Z words are data, not a move");
+        assert!(d.is_empty(), "{d:?}");
+        assert_eq!(m.off_x, 2.0);
+        assert_eq!(m.off_z, -50.0);
+        let b = lex_line("G0 X0 Z0", 1, &mut d).unwrap();
+        let mv = m.apply_block(&b, &mut d).motion.unwrap();
+        assert_eq!((mv.x1, mv.z1), (2.0, -50.0));
     }
 
     #[test]

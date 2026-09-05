@@ -220,8 +220,13 @@ label { color: var(--ink-dim); }
   transform: translateX(-50%);
   z-index: 3;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
+  gap: 8px 12px;
+  /* The plot column is narrow. Without an explicit width the flex row squeezes
+     the explanatory text down to a few characters per line, because the title
+     is nowrap and the button does not shrink. */
+  width: min(92%, 660px);
   max-width: min(92%, 660px);
   padding: 10px 14px;
   background: #3a1010;
@@ -236,8 +241,25 @@ label { color: var(--ink-dim); }
   color: #ff8d85;
   white-space: nowrap;
 }
-.ref-banner .ref-text { font-size: 12.5px; line-height: 1.35; color: #f3d5d2; }
-.ref-banner .btn-home { flex: none; }
+/* Title and button share the first row; the text takes a full row beneath, so
+   it always has the whole banner width to wrap into. */
+.ref-banner .ref-title { flex: 1 1 auto; }
+.ref-banner .btn-home { flex: 0 0 auto; margin-left: auto; }
+.ref-banner .ref-text {
+  flex: 1 1 100%;
+  min-width: 0;
+  font-size: 12.5px;
+  line-height: 1.35;
+  color: #f3d5d2;
+}
+
+/* The [hidden] attribute only works while nothing else sets `display`.
+   Several elements here are toggled with `.hidden = true` but are also styled
+   `display: flex`, and an author rule beats the user-agent `[hidden]` rule —
+   so they never actually hide. This puts that right for every one of them.
+   Symptom this fixes: the NOT REFERENCED banner staying on screen next to a
+   DRO already reading REFERENCED. */
+[hidden] { display: none !important; }
 
 /* ---------------------------------------------------------------- controls */
 

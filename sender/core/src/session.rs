@@ -186,8 +186,6 @@ pub struct Session {
     /// Interpolated display position for the DRO.
     disp_x: f64,
     disp_z: f64,
-    work_offset_x: f64,
-    work_offset_z: f64,
     homed: bool,
     tool: u32,
     alarms: Vec<AlarmInfo>,
@@ -212,13 +210,15 @@ impl Session {
             pending: VecDeque::new(),
             inflight: None,
             cmds: VecDeque::new(),
-            modal: ModalState::default(),
+            // Predicted work offset starts at the same G54 X0/Z-50 the
+            // VirtualMachine (and the LinuxCNC sim's parameter file) ships
+            // with; touch-off (setWorkOffset) moves it via a G10 block so the
+            // prediction and the machine change together.
+            modal: ModalState::with_work_offset(0.0, crate::profile::DEFAULT_G54_Z_MM),
             x: 0.0,
             z: 0.0,
             disp_x: 0.0,
             disp_z: 0.0,
-            work_offset_x: 0.0,
-            work_offset_z: 0.0,
             homed: false,
             tool: 0,
             alarms: Vec::new(),
@@ -326,8 +326,8 @@ impl Session {
             x_radius_mm: self.disp_x,
             x_diameter_mm: self.disp_x * 2.0,
             z_mm: self.disp_z,
-            x_work_mm: self.disp_x - self.work_offset_x,
-            z_work_mm: self.disp_z - self.work_offset_z,
+            x_work_mm: self.disp_x - self.modal.off_x,
+            z_work_mm: self.disp_z - self.modal.off_z,
             x_dtg_mm: dtg_x,
             z_dtg_mm: dtg_z,
             homed: self.homed,
@@ -369,9 +369,9 @@ impl Session {
             }
         }
         if inf.job == JobKind::Home {
-            // Home position: the reference switches at the positive travel end.
+            // The reference point is machine zero: X48 (retracted), Z0.
             self.x = self.profile.x_max_mm;
-            self.z = self.profile.z_max_mm;
+            self.z = 0.0;
             self.disp_x = self.x;
             self.disp_z = self.z;
             self.modal.x = self.x;
@@ -413,7 +413,11 @@ impl Session {
                     if self.program.is_some() {
                         self.next_block = 0;
                         self.program_active = true;
-                        self.modal = ModalState::default();
+                        // Fresh modal state for the new run, but the work
+                        // offset survives - it belongs to the stock in the
+                        // chuck, not to the program.
+                        self.modal =
+                            ModalState::with_work_offset(self.modal.off_x, self.modal.off_z);
                         self.modal.x = self.x;
                         self.modal.z = self.z;
                         self.single_block_gate = false;
@@ -493,10 +497,24 @@ impl Session {
                 }
             }
             Command::SetWorkOffset { axis, value_mm } => {
-                // Touch-off semantics: current position reads `value_mm` afterwards.
-                match axis {
-                    Axis::X => self.work_offset_x = self.disp_x - value_mm,
-                    Axis::Z => self.work_offset_z = self.disp_z - value_mm,
+                // Touch-off semantics: after this, the current position reads
+                // `value_mm` in work coordinates. Expressed as a G10 L2 block
+                // sent through the normal pipeline, so the machine's G54 and
+                // the session's prediction move together - touching off in
+                // the UI behaves like touching off on the machine.
+                if self.run == RunState::Idle && self.inflight.is_none() {
+                    let text = match axis {
+                        Axis::X => {
+                            let off = self.disp_x - value_mm; // machine coord of work X0
+                            let word = if self.modal.diameter_mode { off * 2.0 } else { off };
+                            format!("G10 L2 P1 X{word:.4}")
+                        }
+                        Axis::Z => {
+                            let off = self.disp_z - value_mm;
+                            format!("G10 L2 P1 Z{off:.4}")
+                        }
+                    };
+                    self.queue_text(&text, JobKind::Mdi, out);
                 }
             }
             Command::Home => {
@@ -690,12 +708,12 @@ impl Session {
 mod tests {
     use super::*;
 
+    // Test programs are in work coordinates through the default G54 (X0,
+    // Z-50), like the real gcode/*.ngc files - the machine travel stays the
+    // honest LinuxCNC-sim envelope.
     fn session() -> Session {
         let mut p = MachineProfile::pc_turn_50_default();
         p.dialect = crate::profile::DialectKind::PlainGcode;
-        // Clearance travel above the work face for test programs' positive-Z
-        // approach moves (the real z_max is the reference at 0).
-        p.z_max_mm = 50.0;
         Session::new(p)
     }
 
@@ -959,6 +977,7 @@ mod tests {
         assert_eq!(st.run, RunState::Idle);
         assert!(st.dro.homed);
         assert!((st.dro.x_radius_mm - 48.0).abs() < 1e-9, "home = reference at X48");
+        assert!(st.dro.z_mm.abs() < 1e-9, "machine zero is the reference point");
     }
 
     #[test]
@@ -975,16 +994,21 @@ mod tests {
     }
 
     #[test]
-    fn work_offset_touch_off() {
+    fn work_offset_touch_off_sends_g10() {
         let mut s = session();
         s.tick(0.0, &[]);
+        // Default prediction matches the VirtualMachine: G54 Z-50.
+        assert!((s.dro().z_work_mm - 50.0).abs() < 1e-9, "machine 0 reads work +50");
         // Jog to x=2 radius, then touch off X to 0.
         s.command(Command::Jog { axis: Axis::X, delta_mm: 2.0, feed_mm_min: 100.0 });
         s.tick(1.0, &[]);
         s.tick(2.0, b"ok\r\n");
         assert!((s.dro().x_radius_mm - 2.0).abs() < 1e-9);
         s.command(Command::SetWorkOffset { axis: Axis::X, value_mm: 0.0 });
-        s.tick(3.0, &[]);
+        let out = s.tick(3.0, &[]);
+        let txt = String::from_utf8_lossy(&out.tx).to_string();
+        assert!(txt.contains("G10 L2 P1 X4.0000"), "diameter-mode offset word: {txt}");
+        s.tick(4.0, b"ok\r\n");
         let d = s.dro();
         assert!((d.x_work_mm - 0.0).abs() < 1e-9);
         assert!((d.x_radius_mm - 2.0).abs() < 1e-9, "machine coord unchanged");

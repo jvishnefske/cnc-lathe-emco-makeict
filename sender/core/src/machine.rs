@@ -99,9 +99,14 @@ pub struct VirtualMachine {
 
 impl VirtualMachine {
     pub fn new(profile: MachineProfile) -> VirtualMachine {
+        // G54 defaults to X0 / Z-50 (stock face touched off 50 mm in from the
+        // reference), matching the LinuxCNC simulator's parameter file so both
+        // simulators run the same gcode/*.ngc files. The operator re-touches
+        // this off for every new piece of stock (Session sends G10 L2).
+        let modal = ModalState::with_work_offset(0.0, crate::profile::DEFAULT_G54_Z_MM);
         VirtualMachine {
             profile,
-            modal: ModalState::default(),
+            modal,
             x: 0.0,
             z: 0.0,
             offset_x: 0.0,
@@ -176,8 +181,8 @@ impl VirtualMachine {
             x_radius_mm: self.x,
             x_diameter_mm: self.x * 2.0,
             z_mm: self.z,
-            x_work_mm: self.x,
-            z_work_mm: self.z,
+            x_work_mm: self.x - self.modal.off_x,
+            z_work_mm: self.z - self.modal.off_z,
             x_dtg_mm: dtg_x,
             z_dtg_mm: dtg_z,
             homed: self.homed,
@@ -317,7 +322,7 @@ impl VirtualMachine {
                         // The reference sensors define truth: believed and
                         // physical coincide again and lost steps are forgiven.
                         self.x = self.profile.x_max_mm;
-                        self.z = self.profile.z_max_mm;
+                        self.z = 0.0;
                         self.modal.x = self.x;
                         self.modal.z = self.z;
                         self.offset_x = 0.0;
@@ -393,7 +398,8 @@ impl VirtualMachine {
         // (mechanical reference switch + Balluff Sync-Bero) at the positive
         // travel end (X48, Z0) and re-synchronise the step counters there.
         if block.all('G').any(|g| (g - 28.0).abs() < 1e-9) {
-            let (hx, hz) = (self.profile.x_max_mm, self.profile.z_max_mm);
+            // Machine zero IS the reference point: X48 (retracted), Z0.
+            let (hx, hz) = (self.profile.x_max_mm, 0.0);
             // Seek physically from wherever the slide really is; the sensor
             // trips at the physical reference point regardless of what the
             // control believed.
@@ -540,12 +546,13 @@ impl VirtualMachine {
 mod tests {
     use super::*;
 
+    // Test programs use work coordinates through the default G54 (X0, Z-50),
+    // exactly like the real gcode/*.ngc files: work Z0 is the stock face,
+    // 50 mm in from the reference, so positive-Z approaches are legal inside
+    // the honest all-negative machine travel.
     fn vm() -> VirtualMachine {
         let mut p = MachineProfile::pc_turn_50_default();
         p.turret_index_seconds = 0.5;
-        // Give the sim some clearance travel above the work face so test
-        // programs can use positive Z approach moves.
-        p.z_max_mm = 50.0;
         VirtualMachine::new(p)
     }
 
@@ -554,7 +561,6 @@ mod tests {
     fn vm_with_limits() -> VirtualMachine {
         let mut p = MachineProfile::pc_turn_50_default();
         p.turret_index_seconds = 0.5;
-        p.z_max_mm = 50.0;
         p.has_end_of_travel_limits = true;
         VirtualMachine::new(p)
     }
@@ -603,7 +609,7 @@ mod tests {
         let (out, t) = run_until_idle(&mut m, 0.0, 20_000.0);
         assert!(text(&out).contains("ok"), "move must ack when done");
         let (x, z) = m.pos();
-        assert!((x - 10.0).abs() < 1e-6 && (z + 10.0).abs() < 1e-6);
+        assert!((x - 10.0).abs() < 1e-6 && (z + 60.0).abs() < 1e-6, "work Z-10 = machine Z-60");
         assert!(t >= 600.0, "10mm diagonal rapid can't be instant, took {t} ms");
     }
 
@@ -621,17 +627,18 @@ mod tests {
     fn arc_motion_follows_arc_path() {
         let mut m = vm();
         m.step(0.0, b"G8 G94 F500 G0 X0 Z0\r");
-        run_until_idle(&mut m, 0.0, 10_000.0);
-        m.step(10_000.0, b"G3 X10 Z-10 I0 K-10\r");
-        // Sample mid-motion: the position must stay on the circle centred (0,-10) r=10.
-        let mut t = 10_000.0;
+        run_until_idle(&mut m, 0.0, 60_000.0);
+        m.step(60_000.0, b"G3 X10 Z-10 I0 K-10\r");
+        // Sample mid-motion: work-frame circle centre (0,-10) is machine
+        // (0,-60) through the default G54 Z-50.
+        let mut t = 60_000.0;
         let mut checked = false;
         for _ in 0..4000 {
             t += 5.0;
             m.step(t, &[]);
             let (x, z) = m.pos();
             if x > 1.0 && x < 9.0 {
-                let r = (x.powi(2) + (z + 10.0).powi(2)).sqrt();
+                let r = (x.powi(2) + (z + 60.0).powi(2)).sqrt();
                 assert!((r - 10.0).abs() < 0.01, "off arc at ({x},{z})");
                 checked = true;
             }
@@ -641,7 +648,7 @@ mod tests {
         }
         assert!(checked, "never sampled mid-arc");
         let (x, z) = m.pos();
-        assert!((x - 10.0).abs() < 1e-6 && (z + 10.0).abs() < 1e-6);
+        assert!((x - 10.0).abs() < 1e-6 && (z + 60.0).abs() < 1e-6);
     }
 
     #[test]
@@ -741,7 +748,7 @@ mod tests {
         assert!(text(&out).contains("ok"));
         assert!(m.homed());
         let (x, z) = m.pos();
-        assert_eq!((x, z), (m.profile.x_max_mm, m.profile.z_max_mm));
+        assert_eq!((x, z), (m.profile.x_max_mm, 0.0), "reference is X48, machine Z0");
     }
 
     #[test]
@@ -795,7 +802,7 @@ mod tests {
         // (physically at -2) and stalls again at the lower stop.
         m.step(60_001.0, b"G0 X10\r");
         run_until_idle(&mut m, 60_001.0, 60_000.0);
-        assert!((m.pos().0 - 0.0).abs() < 1e-6, "pinned at the lower stop");
+        assert!((m.pos().0 - (-0.5)).abs() < 1e-6, "pinned at the lower stop (-0.5)");
         assert!((m.believed_pos().0 - 10.0).abs() < 1e-6);
 
         // Referencing off the sensors recovers truth.
@@ -804,7 +811,7 @@ mod tests {
         assert!(m.homed());
         assert!(!m.position_lost());
         assert_eq!(m.pos(), m.believed_pos());
-        assert_eq!(m.pos(), (m.profile.x_max_mm, m.profile.z_max_mm));
+        assert_eq!(m.pos(), (m.profile.x_max_mm, 0.0));
     }
 
     #[test]
@@ -824,7 +831,7 @@ mod tests {
         m.step(10.0, b"G33 Z-10 F1\r");
         let (out, _) = run_until_idle(&mut m, 10.0, 120_000.0);
         assert!(text(&out).contains("ok"));
-        assert!((m.pos().1 + 10.0).abs() < 1e-6);
+        assert!((m.pos().1 + 60.0).abs() < 1e-6, "work Z-10 = machine Z-60");
     }
 
     #[test]
@@ -835,6 +842,7 @@ mod tests {
         let d = m.dro();
         assert!((d.x_radius_mm - 10.0).abs() < 1e-6);
         assert!((d.x_diameter_mm - 20.0).abs() < 1e-6);
+        assert!((d.z_work_mm - (d.z_mm + 50.0)).abs() < 1e-9, "work Z through the G54 Z-50");
     }
 
     #[test]

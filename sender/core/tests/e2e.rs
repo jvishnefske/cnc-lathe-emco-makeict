@@ -7,13 +7,13 @@ use emco_sender_core::machine::VirtualMachine;
 use emco_sender_core::profile::{DialectKind, MachineProfile};
 use emco_sender_core::session::{Command, Event, RunState, Session};
 
+// The honest machine envelope throughout: X -0.5..48 radius, Z -228..+0.5,
+// with the default G54 work offset (X0, Z-50) supplying the clearance -
+// work Z2 is machine Z-48, exactly as in the LinuxCNC simulator.
 fn profile() -> MachineProfile {
     let mut p = MachineProfile::pc_turn_50_default();
     p.dialect = DialectKind::PlainGcode;
     p.turret_index_seconds = 0.2;
-    // The default profile puts Z max at the work face (0); give the tests some
-    // positive clearance travel so approach moves like Z2 are legal.
-    p.z_max_mm = 50.0;
     p
 }
 
@@ -106,10 +106,11 @@ fn program_runs_to_completion_on_virtual_machine() {
         "clean run must not alarm"
     );
 
-    // Final machine truth: X40 diameter -> radius 20, Z2.
+    // Final machine truth: work X40 diameter / Z2 -> machine radius 20,
+    // Z -48 through the default G54 Z-50.
     let (x, z) = vm.pos();
     assert!((x - 20.0).abs() < 1e-6, "vm x = {x}");
-    assert!((z - 2.0).abs() < 1e-6, "vm z = {z}");
+    assert!((z + 48.0).abs() < 1e-6, "vm z = {z}");
     assert!(!vm.spindle_on(), "M05 must stop the spindle");
     assert_eq!(vm.tool(), 1, "T0101 must have indexed the turret");
 
@@ -120,6 +121,7 @@ fn program_runs_to_completion_on_virtual_machine() {
     assert!((st.dro.x_radius_mm - x).abs() < 1e-6);
     assert!((st.dro.x_diameter_mm - 40.0).abs() < 1e-6);
     assert!((st.dro.z_mm - z).abs() < 1e-6);
+    assert!((st.dro.z_work_mm - 2.0).abs() < 1e-6, "work Z reads the programmed 2");
     assert_eq!(st.tool, 1);
     assert!(!st.spindle_on);
 }
@@ -253,4 +255,57 @@ fn jog_and_touch_off_round_trip_through_the_machine() {
     let step = session.tick(t + 10.0, &rx);
     drop(step);
     assert!((session.state().dro.z_mm + 5.0).abs() < 1e-6, "session tracks the jog");
+}
+
+#[test]
+fn tutorial_part_runs_clean_through_session_and_machine() {
+    // The operator guide's worked example. A regression here is a regression
+    // in the teaching material, so it must parse without errors and run to
+    // completion on the honest machine envelope with no soft-limit alarm.
+    let path = format!("{}/../../gcode/tutorial-part.ngc", env!("CARGO_MANIFEST_DIR"));
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read {path}: {e}"));
+    let program = Program::parse(&text);
+    let errors: Vec<_> = program
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == emco_sender_core::gcode::Severity::Error)
+        .collect();
+    assert!(errors.is_empty(), "tutorial must parse clean: {errors:?}");
+
+    let mut session = Session::new(profile());
+    let mut vm = VirtualMachine::new(profile());
+    session.tick(0.0, &[]);
+    session.load_program(&program);
+    session.command(Command::Run);
+
+    let (events, _t) = run_loop(&mut session, &mut vm, 0.0, 3_600_000.0, 10.0);
+
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Alarm { .. })),
+        "tutorial must not alarm (soft limit or otherwise): {:?}",
+        events
+            .iter()
+            .filter(|e| matches!(e, Event::Alarm { .. }))
+            .collect::<Vec<_>>()
+    );
+    let sent = events.iter().filter(|e| matches!(e, Event::Sent { .. })).count();
+    let acked = events.iter().filter(|e| matches!(e, Event::Acked { .. })).count();
+    assert!(sent > 20, "the tutorial is a real program ({sent} blocks sent)");
+    assert_eq!(sent, acked, "every block acknowledged");
+
+    let st = session.state();
+    assert_eq!(st.run, RunState::Idle, "M30 must end the program");
+
+    // Final line: G53 G0 X96 Z0 - the diameter-mode trap. X96 in diameter
+    // mode is machine radius 48 (fully retracted), NOT 96; and Z0 is machine
+    // zero, the reference corner.
+    let (x, z) = vm.pos();
+    assert!((x - 48.0).abs() < 1e-6, "fully retracted means machine radius 48, got {x}");
+    assert!(z.abs() < 1e-6, "machine Z0 at the reference corner, got {z}");
+    assert!(!vm.position_lost(), "a clean run must never touch a mechanical stop");
+    assert!(!vm.spindle_on());
+    assert_eq!(vm.tool(), 3, "parting blade T3 is the last tool used");
+    assert!((st.dro.x_radius_mm - x).abs() < 1e-6, "session prediction agrees with the machine");
+    assert!((st.dro.z_mm - z).abs() < 1e-6);
 }

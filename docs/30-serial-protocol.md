@@ -187,9 +187,10 @@ The only known route to a reference implementation is the original equipment:
    at CC000**. Logging FANOT's reads/writes reveals the *command semantics* — message layouts,
    polling structure, what a "go" looks like — even though the wire *encoding* stays hidden in
    the card hardware. That is still most of the reverse-engineering battle. The
-   `tools/dosbox-capture/` harness and `tools/virtual-ac95.py` (a scripted responder standing in
-   for the machine side) are the workbenches for this; they were conceived for a serial capture
-   and are being re-pointed at the RAM window.
+   `tools/dosbox-capture/` harness documents this route step by step (86Box/PCem/QEMU device
+   models, what to log, what to extract); a scripted responder in the spirit of
+   `tools/virtual-emco.py` is the natural next step once first accesses are captured. Nobody
+   has done this yet — it is the most promising avenue on this page.
 
 ### Rung 2 — passive listen on the bus (low risk)
 
@@ -200,7 +201,7 @@ behaviour is unknown (A2). Cheap to check:
 1. Meter the DB9 first (§7). Confirm pins 3/8 look like a biased differential pair
    (idle differential of roughly +0.2–1 V from the bias network) and that pin 9 carries +5 V.
 2. Attach a USB-RS485 adapter (A/B to pins 8/3, ground to pin 2) **receive-only**: TX disabled
-   or the adapter's driver-enable held off. `tools/ac95-listen.py` sweeps candidate bit rates
+   or the adapter's driver-enable held off. `tools/emco-listen.py` sweeps candidate bit rates
    and framings across repeated power cycles and logs raw bytes and timing. A logic analyser on
    DATA± is better than a UART sweep, because the framing may not be async at all — capture
    edges, then decide what it is.
@@ -211,7 +212,7 @@ behaviour is unknown (A2). Cheap to check:
 
 Only worthwhile with material from rung 1 or 2 to imitate; blind probing of an unknown multidrop
 protocol with unknown framing is close to pointless and is the riskiest activity on this page.
-If attempted: `tools/ac95-probe.py` sends single reviewed frames, full §5 safety rules, two
+If attempted: `tools/emco-probe.py` sends single reviewed frames, full §5 safety rules, two
 people, one change per session, everything logged. Replaying captured master frames from rung 1
 is the only probing strategy with a realistic chance.
 
@@ -271,9 +272,10 @@ move a carriage and spin a chuck under program control; treat every probe as if 
   the sender, which is unaffected.
 - The `Dialect` trait is still exactly the right seam: a future `emco-485` dialect (framing from
   rung 1/2 findings) slots in without touching `Session`, the UI or the backplot. The
-  `MachineProfile.dialect` value `"ac95"` should be read as "the real-machine dialect,
-  currently unimplementable"; `MachineProfile.serial` describes whatever the USB-RS485 adapter
-  presents to Web Serial, *if* the framing turns out to be async-UART-compatible at all.
+  `MachineProfile.dialect` value `"emco"` should be read as "the real-machine dialect,
+  currently unimplementable"; `MachineProfile.link` records the transport truth (`kind:
+  "rs485"`, bit rate unknown), and Web Serial would only ever see it through a USB-RS485
+  adapter, *if* the framing turns out to be async-UART-compatible at all.
 - Web Serial can talk to USB-RS485 CDC adapters, so the browser transport is not the blocker;
   the protocol is. `INTERFACE.md`'s note describing `PlainGcode` as "the community's best guess
   at the AC95" needs revision by its owners to cite this document's verdict.

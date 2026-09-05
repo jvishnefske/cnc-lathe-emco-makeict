@@ -19,6 +19,13 @@ Dialect summary:
   * XON/XOFF flow control (XOFF = busy, XON = ready)
   * "ok" after each block completes, "error: ..." for rejected blocks,
     "ALARM:n ..." when a soft limit trips
+  * G-codes: G0/G1 moves, G4 dwell, G7/G8 diameter/radius mode (boots in
+    RADIUS; internal X is always radius), G18/G40 accepted as no-ops,
+    G20/G21 units, G28 reference, G53 machine-coordinate move, G54 work
+    offset (preset X0 Z-50: stock face 50 mm from the Z reference — the
+    same training convention as the Rust core and the LinuxCNC sim),
+    G90/G91, G94/G95 feed per minute / per revolution
+  * M2/M30 end, M3/M4/M5 spindle (S word required first), M6+T toolchange
 
 Realtime bytes handled even mid-line:
   ?     (0x3F)  status:  <State|X:..|Z:..|S:..|T:n|Q:n|Ref:0/1>
@@ -84,10 +91,13 @@ DEFAULT_PROFILE = {
     # --- from the EMCO manual (docs/_machine-facts.md), not re-measured ---
     # X is radius, matching the repo-wide convention (INTERFACE.md).
     # Usable travel = the soft-limit window below.
-    "soft_x_min_mm": 0.0,
+    # Limit window matches the verified LinuxCNC simulator
+    # (linuxcnc/sim/emco-pcturn50/emco-pcturn50.ini): X -0.5..48 radius
+    # (the -0.5 lets a facing cut pass centreline), Z -228..+0.5.
+    "soft_x_min_mm": -0.5,
     "soft_x_max_mm": 48.0,      # X travel 48 mm usable
     "soft_z_min_mm": -228.0,    # Z travel 228 mm usable
-    "soft_z_max_mm": 0.0,
+    "soft_z_max_mm": 0.5,
     "rapid_mm_min": 750.0,      # rapid traverse 750 mm/min
     "max_feed_mm_min": 1500.0,  # feed 0-750 mm/min, max 1500
     "resolution_mm": 0.001,
@@ -98,10 +108,15 @@ DEFAULT_PROFILE = {
     "turret_index_seconds": 1.5,   # guess; measure at the machine
     # Mechanical hard stops sit a little beyond usable travel (Z has
     # 275 mm mechanical for 228 usable; the margin split is arbitrary).
-    "hard_x_min_mm": -0.5,
+    "hard_x_min_mm": -1.0,
     "hard_x_max_mm": 48.5,
     "hard_z_min_mm": -230.0,
     "hard_z_max_mm": 2.0,
+    # G54 preset: stock face touched off 50 mm in from the Z reference,
+    # X0 on the centreline. Matches the Rust core (sender/INTERFACE.md)
+    # and the LinuxCNC training simulator convention.
+    "g54_x_mm": 0.0,
+    "g54_z_mm": -50.0,
     "reference_x_mm": 48.0,     # where the reference sensors sit (sim)
     "reference_z_mm": 0.0,
     "reference_sync_seconds": 1.0,  # switch + Sync-Bero settle (sim)
@@ -157,7 +172,11 @@ class VirtualEmco:
         self.spindle_dir = 0      # 0 off, +1 M3, -1 M4
         self.absolute = True      # G90
         self.metric = True        # G21
-        self.feed_mm_min = None   # F word; None until set
+        self.diameter_mode = False  # G7 diameter / G8 radius (boot: radius)
+        self.feed_per_rev = False   # G95 mm/rev vs G94 mm/min (boot: G94)
+        self.offset_x = 0.0       # active work offset (machine frame);
+        self.offset_z = 0.0       # zero until G54 is selected
+        self.feed_mm_min = None   # F word; None until set (mm/rev if G95)
         self.state = IDLE
         self.queue = []
         self._linebuf = bytearray()
@@ -284,13 +303,27 @@ class VirtualEmco:
                 self.absolute = True
             elif g == 91:
                 self.absolute = False
-            elif g in (0, 1, 4, 28):
+            elif g == 7:              # diameter mode (the EMCO default way
+                self.diameter_mode = True   # of programming X)
+            elif g == 8:              # radius mode
+                self.diameter_mode = False
+            elif g == 94:             # feed per minute
+                self.feed_per_rev = False
+            elif g == 95:             # feed per revolution
+                self.feed_per_rev = True
+            elif g == 54:             # select the (preset) work offset
+                self.offset_x = self.profile["g54_x_mm"]
+                self.offset_z = self.profile["g54_z_mm"]
+            elif g in (18, 40):       # XZ plane / cutter comp off: accepted
+                pass                  # no-ops (the sim has no comp, and XZ
+                                      # is the only plane it knows)
+            elif g in (0, 1, 4, 28, 53):
                 pass
             else:
                 self._emit(("error: unsupported G%g\r\n" % g).encode())
                 return
         for m in mcodes:
-            if m not in (2, 3, 4, 5, 30):
+            if m not in (2, 3, 4, 5, 6, 30):
                 self._emit(("error: unsupported M%g\r\n" % m).encode())
                 return
         for letter in args:
@@ -301,8 +334,8 @@ class VirtualEmco:
 
         scale = 1.0 if self.metric else 25.4
         if "F" in args:
-            f = args["F"] * scale
-            self.feed_mm_min = min(f, self.profile["max_feed_mm_min"])
+            # mm/min under G94, mm/rev under G95; clamped at motion time.
+            self.feed_mm_min = args["F"] * scale
         if "S" in args:
             s = max(0, min(args["S"], self.profile["spindle_max_rpm"]))
             self.spindle_rpm = int(s)
@@ -343,7 +376,8 @@ class VirtualEmco:
 
         motion_g = 0 if 0 in gcodes else (1 if 1 in gcodes else None)
         if motion_g is not None and ("X" in args or "Z" in args):
-            self._start_motion(motion_g, args, scale)
+            self._start_motion(motion_g, args, scale,
+                               machine_coords=53 in gcodes)
             return
         if motion_g == 1 and "X" not in args and "Z" not in args:
             self._emit(b"error: G1 without axis word\r\n")
@@ -351,15 +385,22 @@ class VirtualEmco:
 
         self._emit(b"ok\r\n")
 
-    def _start_motion(self, g, args, scale):
+    def _start_motion(self, g, args, scale, machine_coords=False):
         p = self.profile
         x1, z1 = self.x, self.z
+        # Internal x is always RADIUS in machine coordinates; incoming X
+        # words are halved in G7 diameter mode, and shifted by the active
+        # work offset unless G53 forced machine coordinates for this line.
+        ox = 0.0 if machine_coords else self.offset_x
+        oz = 0.0 if machine_coords else self.offset_z
         if "X" in args:
             v = args["X"] * scale
-            x1 = v if self.absolute else self.x + v
+            if self.diameter_mode:
+                v /= 2.0
+            x1 = v + ox if self.absolute else self.x + v
         if "Z" in args:
             v = args["Z"] * scale
-            z1 = v if self.absolute else self.z + v
+            z1 = v + oz if self.absolute else self.z + v
 
         # Soft limits: a simulation safety net, and only meaningful once
         # referenced — an unreferenced control has no idea where the
@@ -377,7 +418,15 @@ class VirtualEmco:
             if self.feed_mm_min is None or self.feed_mm_min <= 0:
                 self._emit(b"error: no feed rate (F word) for G1\r\n")
                 return
-            rate = self.feed_mm_min
+            if self.feed_per_rev:
+                if not self.spindle_on or self.spindle_rpm <= 0:
+                    self._emit(b"error: G95 feed needs the spindle "
+                               b"running (M3/M4 with S)\r\n")
+                    return
+                rate = self.feed_mm_min * self.spindle_rpm
+            else:
+                rate = self.feed_mm_min
+            rate = min(rate, p["max_feed_mm_min"])
         else:
             rate = p["rapid_mm_min"]
         dist = math.hypot(x1 - self.x, z1 - self.z)

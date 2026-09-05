@@ -167,6 +167,58 @@ class TestMotionTiming(Harness):
         self.assertIn(b"ok", self.tick(1710))
 
 
+class TestCoordinateModes(Harness):
+    """G7 diameter mode, G54 work offset, G53 machine moves, G95 feed —
+    the codes gcode/tutorial-part.ngc relies on."""
+
+    def test_diameter_mode_halves_x(self):
+        self.send("G7\r", 0)
+        self.send("G0 X20\r", 0)           # 20 mm DIAMETER = 10 mm radius
+        self.tick(2000)
+        self.assertAlmostEqual(self.vm.x, 10.0)
+
+    def test_g54_applies_preset_offset(self):
+        self.send("G54\r", 0)
+        self.send("G0 X20 Z-2\r", 0)       # work Z-2 = machine Z-52
+        self.tick(20000)
+        self.assertAlmostEqual(self.vm.x, 20.0)
+        self.assertAlmostEqual(self.vm.z, -52.0)
+
+    def test_g53_bypasses_offset(self):
+        self.send("G54\r", 0)
+        self.send("G53 G0 X10 Z0\r", 0)    # machine coords despite G54
+        self.tick(20000)
+        self.assertAlmostEqual(self.vm.x, 10.0)
+        self.assertAlmostEqual(self.vm.z, 0.0)
+
+    def test_g95_feed_per_rev_needs_spindle(self):
+        self.send("G95\r", 0)
+        got = self.send("G1 Z-6 F0.1\r", 0)
+        self.assertIn(b"error", got)
+        self.assertIn(b"spindle", got)
+
+    def test_g95_feed_per_rev_timing(self):
+        self.send("S600 M3\r", 0)
+        self.send("G95\r", 0)
+        # 6 mm at 0.1 mm/rev * 600 rpm = 60 mm/min -> 6 s
+        self.send("G1 Z-6 F0.1\r", 0)
+        self.assertNotIn(b"ok", self.tick(5900))
+        self.assertIn(b"ok", self.tick(6100))
+        self.assertAlmostEqual(self.vm.z, -6.0)
+
+    def test_facing_past_centreline_allowed(self):
+        # X soft window reaches -0.5 radius so a facing cut can cross
+        # centre (matches the LinuxCNC sim's MIN_LIMIT).
+        t = self.reference()
+        self.send("G7\r", t)
+        self.send("G0 X14 Z0\r", t)
+        self.tick(t + 20000)
+        got = self.send("G1 X-0.4 F100\r", t + 20000)  # dia -0.4 = r -0.2
+        self.assertNotIn(b"ALARM", got)
+        self.tick(t + 40000)
+        self.assertAlmostEqual(self.vm.x, -0.2)
+
+
 class TestFlowControlAndAlarms(Harness):
 
     def test_xoff_while_busy_then_xon_when_idle(self):

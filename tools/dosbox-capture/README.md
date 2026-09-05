@@ -1,56 +1,122 @@
-# DOSBox capture — the cleanest route to the AC95 protocol
+# Capturing the original EMCO software — the memory-window route
 
-The AC95 wire protocol is undocumented. The cleanest way to learn it is not
-to poke the box and guess, but to **watch the original EMCO DOS software
-talk**, with the machine disconnected. If the software is found, one
-captured session answers most of the open questions at zero risk: baud and
-framing, whether the wire carries G-code text or lower-level block/motion
-commands, what the handshake looks like, and what a start/stop sequence is.
+The machine's original control software (`FANOT`, installed at `C:\PCNC`
+on a DOS PC) drove the lathe through a proprietary **memory-mapped 8-bit
+ISA card** (`Y4A013000` "PCCOM"): a **4 KB dual-port RAM window at
+CC000–CFFFF** (default CC000–CCFFF, jumpers ST1–ST3, selectable IRQ). The
+card's own hardware serialised that shared RAM onto the RS-485 bus
+(control-box connector `X300`). See
+[`../../docs/_machine-facts.md`](../../docs/_machine-facts.md).
 
-**Honest caveat up front:** this whole route depends on obtaining the
-original EMCO DOS software, which we do not currently have. Everything
-below is ready to use the day a copy turns up.
+**Consequence, stated plainly: capturing DOSBox's COM1 will NOT capture
+the machine link.** The machine link never touches a COM port. An earlier
+version of this directory was built around COM1 capture; that approach is
+kept below only for the *file-transfer* side channel. The two avenues that
+can actually work are:
 
-## 1. Find the software
+1. **Emulate the memory window** (software required, card not required) —
+   log what `FANOT` reads and writes at CC000–CFFFF. This reveals the
+   *command semantics*: message layouts, the polling structure, what a
+   "start", "jog" or "stop" looks like in RAM. The wire *encoding* the
+   card hardware generates stays hidden, but semantics are most of the
+   reverse-engineering battle. **This is the most promising avenue and
+   nobody has done it.**
+2. **Tap the wire with the real card** (software *and* card *and* an ISA
+   PC required) — run the real stack against the real machine and capture
+   DATA+/DATA− with a logic analyser or a receive-only USB-RS485 adapter
+   (`../emco-listen.py`). This gives the actual wire framing.
 
-The PC Turn 50 was driven by EMCO's DOS training packages, which put a
-software control on the PC (the Fanuc 0-T variant is the one reported with
-this machine; Sinumerik and Emcotronic variants also existed). Places to
-look, roughly in order of likelihood:
+**Honest caveat up front:** both avenues depend on artefacts we do not
+currently have. Everything below is ready for the day they turn up.
 
-- **The floppies stored with the machine.** EMCO shipped the software with
-  the lathe; school machines usually kept the box of disks nearby. Check
-  drawers, binders, and the PC (or its disk image) if the original host
-  survives anywhere.
-- Other owners of PC Turn 50/55 machines — CNCzone threads, the
-  r/hobbycnc and EMCO user communities have exchanged disk images before.
-- Abandonware archives: WinWorld, archive.org's software collections,
-  old FTP mirrors. Search terms: `EMCO PC TURN`, `EMCO F1 CNC`,
-  `EMCO Fanuc 0-T`, `WinTutor`, `EMCOtronic`.
-- EMCO Maier itself (Hallein, Austria) still supports the education line;
-  a polite email has worked for other legacy-machine owners.
+## 0. Go look for these in the shop
 
-If you image floppies, image them raw (`dd` or Greaseweazle) before doing
-anything else — the disks are 30+ years old.
+- **The floppies**: `FANOT` / `PCNC` disks, the "machine-data disk", the
+  SPS/turret disk, anything labelled EMCO. Check drawers, binders, the
+  bottom of the accessories box. Image them raw (`dd` or Greaseweazle)
+  before doing anything else — they are 30+ years old.
+- **The ISA card `Y4A013000`**: full-length 8-bit ISA card with two 9-pin
+  connectors and a terminator plug, possibly still inside a dead beige PC.
+- **Any old PC carcass** that came with the machine — even a dead one may
+  hold the card and a hard disk with the installed software.
+- Failing the shop: EMCO user communities (CNCzone, CNC-Ecke,
+  PraktikerForum), abandonware archives (search `EMCO PC TURN`,
+  `EMCO Fanuc 0-T`, `FANOT`), and a polite email to EMCO in Hallein,
+  Austria — they still support the education line.
 
-## 2. The idea
+## 1. The memory-window route (86Box / PCem / QEMU)
+
+The idea: boot DOS in an emulator, install the EMCO software, and add a
+fake device that claims the CC000–CFFFF window and logs every access.
 
 ```
-DOS EMCO software ──COM1──> DOSBox-X nullmodem ──TCP──> socat ──> pty + hex log
-                                                                   │
-                                             (optional) tools/virtual-ac95.py
-                                             or nothing at all — just log
+DOS in emulator ── FANOT writes/reads CC000-CFFFF ──> fake dual-port RAM
+                                                        │
+                                              append-only access log
+                                              (offset, byte, r/w, time)
 ```
 
-DOSBox-X emulates COM1 as a "nullmodem" that speaks raw bytes over TCP.
-socat accepts that TCP connection, mirrors it onto a pty, and — the
-important part — logs **every byte in both directions with timestamps**.
+Expected behaviour without a responding "machine": `FANOT` should raise
+alarm **"2520 ORDxx RS485 device absent"** (or 983/2523). Even that is
+informative — the accesses made *before* it gives up show the init
+handshake. The next step is teaching the fake RAM to answer (a scripted
+responder, morally the memory-window sibling of `../virtual-emco.py`), and
+iterating until the software gets further. Each answered step decodes more
+of the protocol.
 
-The machine is never involved. Do this at a desk.
+Concrete steps, in order of increasing fidelity:
 
-## 3. Run it
+1. **QEMU with a custom ISA device** (most scriptable). Write a small
+   device model (C, ~150 lines) registering a `MemoryRegion` with
+   read/write callbacks over 0xCC000–0xCCFFF backed by a 4 KB buffer, and
+   log every access with an instruction-count or virtual-time stamp.
+   Build against QEMU's source tree (`hw/isa/`), boot FreeDOS or MS-DOS
+   6.22 with `-M isapc`, run `FANOT`. QEMU's `-d`/tracing infrastructure
+   can also log memory-region accesses without writing much code —
+   start with `trace-events` on the region before writing a responder.
+2. **86Box / PCem** (most period-faithful). Both emulate real ISA
+   machines and take custom device code in C; add a device that maps the
+   window and logs. Better odds than QEMU if `FANOT` does timing-sensitive
+   or IRQ-driven things (the card has a jumper-selectable IRQ — the log
+   must eventually show whether the software waits on one).
+3. **A dumb first pass with no code at all**: run the software in DOSBox-X
+   with a debugger build, set memory watchpoints on CC00:0000–0FFF, and
+   note what it touches. DOSBox-X cannot emulate the card properly (no
+   custom ISA memory-window devices without patching), but watching the
+   first faulting accesses tells you the window really is where the
+   manual says, and what gets written first.
 
-Start the logger first (from the repo root; socat is in the nix dev shell):
+What to extract from a log, in priority order: the init sequence and any
+IRQ dependence; the layout (command mailboxes? ring buffers? per-device
+regions for CPU vs SPS?); what changes when you press cycle-start /
+feed-hold / reset in the software; how a part program gets into RAM. Write
+findings into `docs/30-serial-protocol.md` §8 (findings log), and mirror
+testable ones into a responder script.
+
+## 2. The wire-tap route (real card, real PC)
+
+If both the card and software turn up: build a period ISA PC (386/486, or
+an industrial ISA backplane), install both, connect to the machine
+(cable `K1000`, DB9 `X300`), and capture:
+
+- **Logic analyser** across DATA+ (pin 8) and DATA− (pin 3), ground to
+  pin 2 — preferred, because it captures edges without assuming UART
+  framing. Decode afterwards.
+- Or `../emco-listen.py` with a USB-RS485 adapter as a third bus device,
+  receive-only, if the framing turns out to be async.
+
+Exercise every function while capturing: power-up, reference, jog, MDI, a
+small program, feed hold, reset, turret index. One good session makes
+everything else in this project easy. Safety rules: doc 30 §5 — the
+machine can move; two people, empty chuck, hand on the mains switch.
+
+## 3. Legacy: COM1 capture (file-transfer channel only)
+
+The DOS PC's own COM1/COM2 (9600, 7 data bits, even parity) was used
+solely to move part-program and tool-offset *files* to external devices —
+**not** the machine link. If you want to decode that file-transfer format
+(useful for reading old program disks or feeding a WinNC-era workflow),
+the original COM1-capture harness still works:
 
 ```sh
 mkdir -p captures
@@ -58,86 +124,20 @@ socat -d -d -lu -x -v \
     TCP-LISTEN:5555,reuseaddr \
     PTY,link=/tmp/emco-dos-pty,raw,echo=0 \
     2>captures/dos-session-$(date +%Y%m%d-%H%M%S).log
-```
-
-- `-x -v` hex-dumps and text-dumps both directions to stderr,
-  `>` vs `<` marking direction; `-lu` adds microsecond timestamps.
-- `/tmp/emco-dos-pty` is the "machine side". Leave it unconnected for a
-  pure capture — the DOS software will think the cable is plugged in but
-  the controller silent, which is itself informative (what does it send
-  first? does it retry? does it wait on CTS?).
-
-Then, in another terminal:
-
-```sh
+# then, in another terminal:
 dosbox-x -conf tools/dosbox-capture/dosbox-x.conf
 ```
 
-Edit the `mount` line in the conf (or at the DOS prompt) to point at the
-unpacked EMCO software, start it, and go through the motions: connect,
-send a tiny program, single-step it. Everything crossing COM1 lands in the
-log file.
+[`dosbox-x.conf`](dosbox-x.conf) bridges COM1 to that socat listener with
+`transparent:1` (raw bytes, no telnet escaping). In the EMCO software,
+F9 = output / F10 = input with device 1 (COM1). Expect ISO G-code text
+with `%` terminators. Do not mistake anything captured here for the
+machine protocol.
 
-Config lines that matter (already in `dosbox-x.conf`):
+## Where results go
 
-```ini
-[serial]
-serial1 = nullmodem server:127.0.0.1 port:5555 transparent:1
-```
-
-`transparent:1` is essential — without it the nullmodem speaks telnet and
-escapes 0xFF bytes, corrupting a binary protocol capture.
-
-## 4. Variations
-
-- **Talk back:** point the software at our simulator to test hypotheses —
-  run `python3 tools/virtual-ac95.py` (it prints its pty path, e.g.
-  `/dev/pts/7`) and bridge it instead of a dead-end pty:
-
-  ```sh
-  socat -d -d -lu -x -v \
-      TCP-LISTEN:5555,reuseaddr \
-      /dev/pts/7,raw,echo=0 \
-      2>captures/dos-vs-sim-$(date +%Y%m%d-%H%M%S).log
-  ```
-
-  If the DOS software gets further against the simulator after a protocol
-  tweak, the tweak is probably right. Iterate.
-
-- **Manual poking from the pty side:** `picocom /tmp/emco-dos-pty` lets a
-  human play "machine" by hand while the log records everything.
-
-- **QEMU instead of DOSBox-X:** boot a real DOS image with
-  `-serial tcp:127.0.0.1:5555` (same socat listener) or `-serial pty`
-  (then log that pty with socat). QEMU's 16550 emulation is more faithful
-  if the EMCO software does exotic UART programming; DOSBox-X is easier to
-  drive.
-
-## 5. Reading the capture
-
-Each socat log line looks like:
-
-```
-> 2026/09/04 12:34:56.789012  length=4 from=0 to=3
- 25 0d 4e 31                                      %.N1
-```
-
-`>` is DOS→machine, `<` is machine→DOS. Things to extract:
-
-1. **First bytes sent** on connect — likely an enquiry or reset sequence;
-   prime candidates for `tools/ac95-probe.py`'s curated list.
-2. **Framing of a program transfer** — raw G-code lines? `%` tape
-   wrapper? binary blocks with checksums?
-3. **Pacing** — the timestamps show whether the software waits between
-   blocks (suggesting CTS/ack gating) or streams freely.
-4. **The stop/abort sequence**, if you press stop in the software —
-   this is the single most safety-relevant byte sequence to learn.
-
-Baud rate does not appear in a TCP capture. Get it from the DOS
-software's config screen/files (look for `COM1`, `9600`, `MODE` in
-`.CFG`/`.INI`/`.BAT` files), or from `tools/ac95-listen.py --sweep`
-against the real box.
-
-Drop captures in `captures/` (git-ignored or committed as evidence —
-committing them is encouraged) and write findings up in
-`docs/30-serial-protocol.md`.
+Captures land in `captures/` (committing them as evidence is encouraged);
+conclusions go to [`../../docs/30-serial-protocol.md`](../../docs/30-serial-protocol.md)
+— the findings log (§8) and the known/assumed tables (§2). If semantics
+become testable, they get scripted into a responder so hypotheses can be
+run, not argued about.

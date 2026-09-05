@@ -50,7 +50,7 @@
             echo "  sender/core : cargo test        (native, no browser)"
             echo "  sender/web  : npm ci && npm run dev"
             echo "  sim/        : docker compose -f sim/compose.yml up"
-            echo "  tools/      : python3 tools/virtual-ac95.py"
+            echo "  tools/      : python3 tools/virtual-emco.py"
           '';
         };
       });

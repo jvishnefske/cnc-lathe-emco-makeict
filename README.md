@@ -3,7 +3,7 @@
 Documentation, control software and a training simulator for MakeICT's **EMCO PC TURN 50**
 benchtop CNC lathe.
 
-![The machine](docs/img/machine-overview.jpg)
+![The machine](docs/img/machine-front-view.jpg)
 
 ## What this machine is
 

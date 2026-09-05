@@ -215,6 +215,11 @@ export class MockSession implements SessionApi {
   private live: ParserState; // modal/positional state as blocks are sent
   private sim: MotionSim; // local motion model for the DRO
   private sentQueue: SentBlock[] = [];
+  /** "ok" responses received but not yet matched to a completed block.
+   * Persisted across ticks: the wire ack and the local motion can finish on
+   * different frames (e.g. during feed hold, or when the machine acks a
+   * non-motion block instantly while our simulated motion is still going). */
+  private acks = 0;
   private rxBuf = "";
   private lastMs: number | null = null;
   private run: RunState = "disconnected";
@@ -295,13 +300,12 @@ export class MockSession implements SessionApi {
 
     // Consume machine responses.
     let idx: number;
-    let acks = 0;
     while ((idx = this.rxBuf.search(/[\r\n]/)) >= 0) {
       const lineText = this.rxBuf.slice(0, idx).trim();
       this.rxBuf = this.rxBuf.slice(idx + 1);
       if (lineText === "") continue;
       if (lineText === "ok") {
-        acks++;
+        this.acks++;
       } else if (lineText.startsWith("ALARM:")) {
         const parts = lineText.split(":");
         const code = parts[1] ?? "ALARM";
@@ -323,9 +327,9 @@ export class MockSession implements SessionApi {
     while (this.sentQueue.length > 0) {
       const head = this.sentQueue[0]!;
       const motionDone = !head.hasMotion || this.sim.idle;
-      const wireAck = this.dryRun ? motionDone : acks > 0;
+      const wireAck = this.dryRun ? motionDone : this.acks > 0;
       if (!(wireAck && motionDone)) break;
-      if (!this.dryRun) acks--;
+      if (!this.dryRun) this.acks--;
       this.sentQueue.shift();
       events.push({ kind: "acked", line: head.line, atMs: nowMs });
       if (this.programActive && this.singleBlock && this.blockQueue.length > 0 && this.run === "running") {
@@ -426,6 +430,7 @@ export class MockSession implements SessionApi {
         this.mdiText = [];
         this.programActive = false;
         this.alarms = [];
+        this.acks = 0; // stale acks must not leak into the next run
         this.setRun("idle", nowMs, events);
         break;
       }

@@ -58,6 +58,38 @@ power-up behaviour is unknown and the CPU↔PLC daisy chain might chatter.
 A logic analyser across DATA+/DATA− is better than a UART sweep, because
 the framing may not be async at all. Silence is a real finding — log it.
 
+### 3b. The capture bridge — timestamped, direction-tagged, always attached
+
+```sh
+python3 tools/emco-capture.py --port /dev/ttyACM1          # the record port
+python3 tools/emco-listen.py  --port /dev/ttyACM0          # the raw port, unchanged
+python3 tools/emco-capture.py --replay capture.bin         # no hardware
+```
+
+For any capture longer than a few minutes, use
+[`../firmware/`](../firmware/README.md) rather than a bare dongle. It is an
+STM32F4 that presents two USB serial ports: a **raw passthrough**, which
+`emco-listen.py` reads unchanged, and a **record stream** carrying a hardware
+microsecond timestamp per byte, a direction tag, and the UART's own
+framing/parity/noise/overrun flags.
+
+The three things a dongle cannot give are the three this ladder needs. Host
+timestamps are taken at `read()`, after USB's 1 ms frames and `cdc_acm`
+buffering, and at 9600 baud a character is 1042 µs — so host timing destroys
+the inter-byte signature that would identify a polled protocol. On 3-wire
+half-duplex, an echo and a reply are the same bytes. And `pyserial` cannot see
+a framing error at all, which matters because the wire may not be async-UART
+framed (doc 30 §2.2, A1): an error at a known timestamp is a **positive
+finding**.
+
+It is listen-only by default as a compile-time property — the transmit path is
+not in the binary — and every `STATUS` record names the build variant, so a
+transcript proves which firmware produced it. It does **not** replace a logic
+analyser across `DATA±`, which is still the better first instrument.
+
+`tools/virtual-bridge.py` puts both ports on ptys with a fake clock, so all of
+this is exercisable with no hardware at all — see below.
+
 ### 4. `emco-probe.py` — guarded active probing (last resort)
 
 ```sh
@@ -121,8 +153,53 @@ Exercises the simulator's parsing, motion timing, coordinate modes
 (diameter, work offsets, feed-per-rev), flow control and alarm behaviour
 with a fake clock: no hardware, no pty, no pyserial.
 
+### `virtual-bridge.py` — a simulated capture bridge on two ptys
+
+```sh
+python3 tools/virtual-bridge.py
+# virtual RS-485 capture bridge up
+#   raw     : /dev/pts/7     (point tools/emco-listen.py here)
+#   records : /dev/pts/9     (point tools/emco-capture.py here)
+```
+
+Both USB ports of [`../firmware/`](../firmware/README.md), on a fake clock, so
+the framing specification is executable before a board exists. The bus traffic
+is an **invented** polled-multidrop pattern — a development fiction, like
+`virtual-emco.py`'s dialect — chosen to exercise every record kind and every
+flag. Stdlib only.
+
+### `test_emco_bridge.py` — decoder tests and the cross-language corpus
+
+```sh
+python3 tools/test_emco_bridge.py
+```
+
+Two kinds of case. The first is ordinary decoder testing: timestamps, flags,
+direction, clock un-wrapping, and resynchronisation swept across every possible
+cut point. The second matters more — there are **two** implementations of the
+record format, a Rust encoder on the bridge and this Python decoder, and two
+implementations of a wire format drift silently. So
+`firmware/bridge-core/tests/golden.rs` writes a fixed corpus, a Rust test
+asserts its bytes have not changed, and these cases assert the Python decoder
+reproduces exactly the records the scenario describes. Neither side can move
+without the other going red.
+
+### `image-size.py` — what would actually be flashed
+
+```sh
+python3 tools/image-size.py firmware.elf --min-bytes 16384
+```
+
+Sums an ELF's `PT_LOAD` segments. It exists because of one silent failure:
+without `-Tlink.x` the linker keeps no vector table, garbage-collects the
+program to nothing, and **still succeeds**. Build, flash and verify all report
+success and the board does nothing.
+
 ## Related
 
+- [`../firmware/README.md`](../firmware/README.md) — the capture bridge these
+  two new tools talk to, and the honest list of what has not been verified on
+  it.
 - `../sender/cli/send.py` — headless G-code sender (streams a file with
   ack pacing and flow control); the counterpart these tools are tested
   against, and the fallback when no Web Serial browser is available.

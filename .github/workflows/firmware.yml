@@ -1,0 +1,65 @@
+# Everything about the RS-485 capture bridge that can be checked without a
+# board, which is everything except the board.
+#
+# This is the repository's first workflow and it is deliberately narrow. It
+# covers `firmware/` and the two host-side tools that talk to it, because
+# those are the parts with a cross-compile and a cross-LANGUAGE agreement in
+# them — the record format has a Rust encoder and a Python decoder, and two
+# implementations of a wire format drift silently. The rest of the repository
+# is documentation and a browser sender that already has its own local
+# workflow; widening this to cover them is a separate decision.
+#
+# What it does NOT check is stated in firmware/README.md: USB enumeration,
+# timestamp accuracy and the DE turnaround all need hardware, and a green run
+# here says nothing about any of them.
+
+name: firmware
+
+on:
+  push:
+    paths:
+      - "firmware/**"
+      - "tools/emco-capture.py"
+      - "tools/virtual-bridge.py"
+      - "tools/test_emco_bridge.py"
+      - "tools/image-size.py"
+      - ".github/workflows/firmware.yml"
+  pull_request:
+    paths:
+      - "firmware/**"
+      - "tools/**"
+      - ".github/workflows/firmware.yml"
+  workflow_dispatch:
+
+jobs:
+  bridge:
+    name: bridge-core, both firmware variants, and the host decoder
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # `thumbv7em-none-eabihf` is the bridge's target. Adding it is seconds;
+      # without it the firmware builds would silently not happen and the job
+      # would go green having compiled only the host crate.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            firmware/bridge-core
+            firmware/rs485-bridge
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # One script, so that what CI checks and what a person runs before
+      # pushing cannot drift apart. It builds both feature sets, asserts a
+      # plausible image size, greps the listen-only image to prove the
+      # transmit path is absent from it, greps the transmitting one to prove
+      # that absence means something, and runs the decoder against the corpus
+      # the Rust encoder wrote.
+      - name: ./firmware/check.sh
+        run: ./firmware/check.sh

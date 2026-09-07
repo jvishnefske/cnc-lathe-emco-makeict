@@ -5,6 +5,8 @@ reference/
 # Rust / wasm
 sender/core/target/
 sender/core/pkg/
+firmware/bridge-core/target/
+firmware/rs485-bridge/target/
 
 # Node
 node_modules/

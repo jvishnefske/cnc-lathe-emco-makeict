@@ -1,0 +1,16 @@
+[build]
+target = "thumbv7em-none-eabihf"
+
+[target.thumbv7em-none-eabihf]
+# `link.x` comes from cortex-m-rt and places the vector table. WITHOUT IT THE
+# LINK STILL SUCCEEDS: the linker keeps no `.vector_table`, garbage-collects
+# the program down to nothing, and produces a valid ELF that does nothing at
+# all on the board. That failure costs an afternoon, which is why the build
+# also asserts a minimum plausible image size.
+rustflags = ["-C", "link-arg=--nmagic", "-C", "link-arg=-Tlink.x"]
+runner = "probe-rs run --chip STM32F407VGTx"
+
+[env]
+# embassy-stm32's `memory-x` feature generates memory.x from the chip feature,
+# so there is no hand-written linker script to keep in step with the part.
+DEFMT_LOG = "info"

@@ -95,7 +95,10 @@ fn corpus() -> Vec<u8> {
         bridge.on_rx(4_000_000 + i * 100_000, 0xDD, 0);
         bridge.on_idle(4_000_000 + i * 100_000 + 50_000);
     }
-    assert!(bridge.counters().dropped_records > 0, "the ring never filled");
+    assert!(
+        bridge.counters().dropped_records > 0,
+        "the ring never filled"
+    );
     drain(&mut bridge, &mut out);
     bridge.on_rx(8_000_000, 0xEE, 0);
     bridge.on_idle(8_100_000);
@@ -177,8 +180,16 @@ fn the_corpus_contains_every_record_kind_and_the_awkward_cases() {
     );
     assert_ne!(0, flags & flag::FRAMING, "no framing error in the corpus");
     assert_ne!(0, flags & flag::NOISE, "no noise flag in the corpus");
-    assert_ne!(0, flags & flag::DROPPED, "no dropped-record gap in the corpus");
-    assert_ne!(0, flags & flag::LISTEN_ONLY, "no build variant in the corpus");
+    assert_ne!(
+        0,
+        flags & flag::DROPPED,
+        "no dropped-record gap in the corpus"
+    );
+    assert_ne!(
+        0,
+        flags & flag::LISTEN_ONLY,
+        "no build variant in the corpus"
+    );
     assert_eq!(MAX_PAYLOAD, longest, "no full-length record in the corpus");
 }
 

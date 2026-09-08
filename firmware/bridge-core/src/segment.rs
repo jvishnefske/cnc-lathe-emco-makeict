@@ -46,7 +46,9 @@ impl Config {
     /// three characters at 9600.
     pub const fn at_baud(baud: u32) -> Self {
         let bit_micros = 1_000_000 / baud;
-        Self { gap_micros: bit_micros * 35 }
+        Self {
+            gap_micros: bit_micros * 35,
+        }
     }
 
     pub const fn with_gap(gap_micros: u32) -> Self {
@@ -220,7 +222,9 @@ mod tests {
     fn two_errors_in_a_row_are_two_records() {
         let mut s = segmenter();
         s.push(1_000, 0x01, flag::FRAMING);
-        let first = s.push(1_100, 0x02, flag::PARITY).expect("the first was swallowed");
+        let first = s
+            .push(1_100, 0x02, flag::PARITY)
+            .expect("the first was swallowed");
         assert_eq!(flag::FRAMING, first.flags);
         let second = s.flush().expect("the second was swallowed");
         assert_eq!(flag::PARITY, second.flags);
@@ -263,7 +267,7 @@ mod tests {
         let mut s = segmenter();
         s.push(u32::MAX - 100, b'A', 0);
         s.push(u32::MAX, b'B', 0);
-        s.push(50, b'C', 0);            // wrapped
+        s.push(50, b'C', 0); // wrapped
         let record = s.flush().unwrap();
         assert_eq!(3, record.len);
         assert_eq!(&[0, 100, 51], &record.gaps[..3]);

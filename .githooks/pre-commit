@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# Rust formatting and lints, before the commit rather than after the push.
+#
+# Install:  git config core.hooksPath .githooks
+#           (`nix develop` does this for you; see flake.nix)
+# Skip once: git commit --no-verify
+#
+# SCOPE. Only the Rust files in THIS commit are checked, and only the crates
+# those files belong to are linted. That keeps the hook proportional to what
+# you changed, and it is also the only honest option here: `sender/core` has
+# never been run through rustfmt and has ~112 differences waiting. Gating the
+# whole tree would mean reformatting somebody else's code as the price of
+# committing a typo fix. The first commit that touches a `sender/core` file
+# will ask you to format that file; `cargo fmt --all` in `sender/core` does the
+# lot in one go if you would rather get it over with.
+#
+# WHAT IS CHECKED, AND AGAINST WHAT. Both checks read the WORKING TREE, not the
+# staged content. Checking the staged blobs would be better for `git add -p`,
+# and the obvious way to do it does not work: rustfmt follows `mod`
+# declarations, so a file copied out to a temporary directory fails with
+# "failed to resolve mod `cobs`" and every such file looks unformatted. That
+# was this hook's first bug. Claiming to check the index while actually
+# checking nothing is worse than checking the tree and saying so, which is
+# what this does. If your tree and your index differ, both checks are telling
+# you about the tree.
+
+set -uo pipefail
+
+root=$(git rev-parse --show-toplevel)
+cd "$root" || exit 1
+
+# --------------------------------------------------------------- the crates
+#
+# One line per crate: the directory, then the clippy arguments it needs.
+# Explicit rather than inferred, because the arguments genuinely differ and
+# the differences are not guessable:
+#
+#   `rs485-bridge` builds for a bare-metal target, where `--all-targets`
+#   pulls in test harnesses that need a `test` crate the target has no copy
+#   of -- the failure is `can't find crate for 'test'`, which reads like a
+#   broken toolchain and is not. It also has two feature sets, and the
+#   listen-only interlock is only meaningful if the OTHER one compiles too.
+CRATES=(
+    "sender/core|--all-targets"
+    "firmware/bridge-core|--all-targets"
+    "firmware/rs485-bridge|"
+    "firmware/rs485-bridge|--no-default-features --features board-f407-discovery"
+)
+
+# A crate nobody listed is a crate nobody lints, and it would go unnoticed for
+# exactly as long as it took somebody to add one. Fail loudly instead.
+missing=""
+while IFS= read -r manifest; do
+    dir=$(dirname "$manifest")
+    listed=""
+    for entry in "${CRATES[@]}"; do
+        [ "${entry%%|*}" = "$dir" ] && listed=yes
+    done
+    [ -z "$listed" ] && missing="$missing  $dir\n"
+done < <(git ls-files '*Cargo.toml')
+
+if [ -n "$missing" ]; then
+    printf 'pre-commit: these crates are not in the hook’s table, so nothing lints them:\n'
+    printf "$missing"
+    printf 'Add them to CRATES in .githooks/pre-commit, with the clippy arguments they need.\n'
+    exit 1
+fi
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR -- '*.rs')
+[ -z "$staged" ] && exit 0
+
+fail=0
+
+# ------------------------------------------------------------- rustfmt
+#
+# One invocation per file, on the file itself. Note that rustfmt pulls in a
+# file's `mod` children, so staging a crate root effectively checks the whole
+# crate -- which is the right answer, if a surprising one the first time.
+
+unformatted=""
+while IFS= read -r file; do
+    [ -f "$file" ] || continue
+    if ! rustfmt --edition 2021 --check --quiet "$file" >/dev/null 2>&1; then
+        unformatted="$unformatted  $file\n"
+    fi
+done <<< "$staged"
+
+if [ -n "$unformatted" ]; then
+    printf '\npre-commit: rustfmt would change these files:\n'
+    printf "$unformatted"
+    printf '\nFix:  rustfmt --edition 2021 <the files above>\n'
+    printf '  or: cargo fmt --all        (from inside the crate)\n'
+    printf 'then `git add` them again.\n'
+    fail=1
+fi
+
+# ------------------------------------------------------------- clippy
+#
+# Only the crates a staged file lives in. On a cold cache the embassy crate is
+# a couple of minutes; after that it is seconds, and `--no-verify` is there for
+# when you need it.
+for entry in "${CRATES[@]}"; do
+    dir="${entry%%|*}"
+    args="${entry#*|}"
+    echo "$staged" | grep -q "^$dir/" || continue
+
+    label="$dir${args:+ ($args)}"
+    printf 'pre-commit: clippy %s\n' "$label"
+    # shellcheck disable=SC2086
+    if ! (cd "$dir" && cargo clippy $args --quiet -- -D warnings); then
+        printf '\npre-commit: clippy failed in %s\n' "$label"
+        fail=1
+    fi
+done
+
+if [ "$fail" -ne 0 ]; then
+    printf '\nCommit refused. `git commit --no-verify` overrides this if you need it to.\n'
+    exit 1
+fi

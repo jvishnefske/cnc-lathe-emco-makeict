@@ -60,12 +60,12 @@ pub fn decode(encoded: &[u8], out: &mut [u8]) -> Option<usize> {
     while at < encoded.len() {
         let code = encoded[at] as usize;
         if code == 0 {
-            return None;                    // a zero inside a frame: not COBS
+            return None; // a zero inside a frame: not COBS
         }
         at += 1;
         let run = code - 1;
         if at + run > encoded.len() {
-            return None;                    // the frame ended mid-run
+            return None; // the frame ended mid-run
         }
         if written + run > out.len() {
             return None;

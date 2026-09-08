@@ -16,7 +16,11 @@ pub struct Ring<const N: usize> {
 
 impl<const N: usize> Ring<N> {
     pub const fn new() -> Self {
-        Self { buffer: [0; N], head: 0, tail: 0 }
+        Self {
+            buffer: [0; N],
+            head: 0,
+            tail: 0,
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -84,7 +88,7 @@ mod tests {
     #[test]
     fn a_write_that_does_not_fit_writes_nothing() {
         let mut ring: Ring<8> = Ring::new();
-        assert!(ring.write(&[1, 2, 3, 4, 5, 6, 7]));   // 7 of 7 usable
+        assert!(ring.write(&[1, 2, 3, 4, 5, 6, 7])); // 7 of 7 usable
         assert!(!ring.write(&[9]));
         let mut out = [0u8; 16];
         assert_eq!(7, ring.read(&mut out));

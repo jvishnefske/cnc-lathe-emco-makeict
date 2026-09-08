@@ -117,9 +117,21 @@ rustup target add thumbv7em-none-eabihf
 ./firmware/check.sh          # everything that does not need a board
 ```
 
-That runs `bridge-core`'s tests, both firmware builds, the image-size
-assertion, the listen-only symbol check, the Python decoder tests including the
-cross-language corpus, and the simulator end to end.
+That runs rustfmt and clippy over both crates, `bridge-core`'s tests, both
+firmware builds, the image-size assertion, the listen-only symbol check, the
+Python decoder tests including the cross-language corpus, and the simulator end
+to end.
+
+`.githooks/pre-commit` runs the same rustfmt and clippy checks before a commit,
+scoped to the files and crates you actually touched. `nix develop` points git
+at it; by hand it is:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+`git commit --no-verify` skips it. It is a fast local echo of CI rather than a
+second opinion — the gate that holds is `check.sh`, which CI runs.
 
 To flash, with the board on its ST-LINK:
 

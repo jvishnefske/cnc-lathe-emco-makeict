@@ -71,9 +71,9 @@ mod board;
 
 use embassy_executor::Spawner;
 use embassy_futures::select::{select3, Either3};
-use embassy_stm32::gpio::{Level, Output, Speed};
 #[cfg(feature = "listen-only")]
 use embassy_stm32::gpio::{Input, Pull};
+use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::mode::Async;
 use embassy_stm32::usart::{self, UartRx};
 #[cfg(not(feature = "listen-only"))]
@@ -82,9 +82,9 @@ use embassy_stm32::usb::{self, Driver};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Instant, Timer};
-use embassy_usb::class::cdc_acm::{CdcAcmClass, Sender, State};
 #[cfg(not(feature = "listen-only"))]
 use embassy_usb::class::cdc_acm::Receiver;
+use embassy_usb::class::cdc_acm::{CdcAcmClass, Sender, State};
 use embassy_usb::driver::EndpointError;
 use embassy_usb::{Builder, Config as UsbConfig};
 use static_cell::StaticCell;
@@ -95,7 +95,11 @@ use emco_bridge_core::{event, Bridge, Config as BridgeConfig, PROTOCOL_VERSION};
 use panic_halt as _;
 
 /// What the `STATUS` record's description says this build is.
-const VARIANT: &str = if cfg!(feature = "listen-only") { "listen-only" } else { "tx-armed" };
+const VARIANT: &str = if cfg!(feature = "listen-only") {
+    "listen-only"
+} else {
+    "tx-armed"
+};
 
 /// The outbound record queue, in bytes.
 ///
@@ -233,7 +237,7 @@ async fn records(
 
             let n = bridge.read(&mut out);
             if n > 0 && write_all(&mut port, &out[..n]).await.is_err() {
-                break;                       // unplugged; wait for the next host
+                break; // unplugged; wait for the next host
             }
         }
     }
@@ -335,7 +339,10 @@ async fn passthrough(
 
 #[embassy_executor::task]
 async fn run_usb(
-    mut device: embassy_usb::UsbDevice<'static, Driver<'static, embassy_stm32::peripherals::USB_OTG_FS>>,
+    mut device: embassy_usb::UsbDevice<
+        'static,
+        Driver<'static, embassy_stm32::peripherals::USB_OTG_FS>,
+    >,
 ) -> ! {
     device.run().await
 }
@@ -468,7 +475,12 @@ async fn main(spawner: Spawner) {
     // firmware has claimed, let alone by data.
     #[cfg(feature = "listen-only")]
     let rx = {
-        drop((hardware.uart_tx, hardware.tx_dma));
+        // MOVED, not dropped. The point is that these are consumed here, so a
+        // second user of either is a compile error rather than two drivers on
+        // one bus. `drop()` would read as "release them", which is the
+        // opposite, and clippy is right to say so: neither type implements
+        // `Drop`, so calling it would do nothing but look decisive.
+        let _consumed = (hardware.uart_tx, hardware.tx_dma);
         UartRx::new(
             hardware.usart,
             hardware.uart_rx,
@@ -552,8 +564,11 @@ async fn main(spawner: Spawner) {
     // the bus said goes out, and — only in a transmitting build — what the
     // host wants to say comes in.
     let (raw_out, raw_in) = raw_port.split();
+    // The host-to-bus half exists in every build and is spawned in only one.
+    // Consuming it here is what makes "a listen-only build cannot read from
+    // the host port" a fact about the types rather than about the code below.
     #[cfg(feature = "listen-only")]
-    drop(raw_in);
+    let _consumed = raw_in;
 
     // ---- lights ---------------------------------------------------------
     let led_rx = Output::new(hardware.led_rx, Level::Low, Speed::Low);
@@ -563,10 +578,12 @@ async fn main(spawner: Spawner) {
     spawner.spawn(run_usb(device).expect("the task pool was already full"));
     spawner.spawn(capture(rx).expect("the task pool was already full"));
     spawner.spawn(passthrough(raw_out).expect("the task pool was already full"));
-    spawner.spawn(records(record_port, led_rx, led_error, board::DEFAULT_BAUD).expect("the task pool was already full"));
+    spawner.spawn(
+        records(record_port, led_rx, led_error, board::DEFAULT_BAUD)
+            .expect("the task pool was already full"),
+    );
     #[cfg(not(feature = "listen-only"))]
     spawner.spawn(
-        transmit(raw_in, uart_tx, de, board::DEFAULT_BAUD)
-            .expect("the task pool was already full"),
+        transmit(raw_in, uart_tx, de, board::DEFAULT_BAUD).expect("the task pool was already full"),
     );
 }

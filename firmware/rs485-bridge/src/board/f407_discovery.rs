@@ -110,14 +110,16 @@ pub fn take(p: embassy_stm32::Peripherals) -> Board {
 pub fn clocks(config: &mut embassy_stm32::Config) {
     use embassy_stm32::rcc::*;
 
-    config.rcc.hse = Some(Hse { freq: embassy_stm32::time::Hertz(8_000_000),
-                                mode: HseMode::Bypass });
+    config.rcc.hse = Some(Hse {
+        freq: embassy_stm32::time::Hertz(8_000_000),
+        mode: HseMode::Bypass,
+    });
     config.rcc.pll_src = PllSource::HSE;
     config.rcc.pll = Some(Pll {
-        prediv: PllPreDiv::DIV4,      //  8 MHz -> 2 MHz
-        mul: PllMul::MUL168,          //  2 MHz -> 336 MHz
-        divp: Some(PllPDiv::DIV2),    // 336    -> 168 MHz, the core
-        divq: Some(PllQDiv::DIV7),    // 336    -> 48 MHz, and USB needs exactly this
+        prediv: PllPreDiv::DIV4,   //  8 MHz -> 2 MHz
+        mul: PllMul::MUL168,       //  2 MHz -> 336 MHz
+        divp: Some(PllPDiv::DIV2), // 336    -> 168 MHz, the core
+        divq: Some(PllQDiv::DIV7), // 336    -> 48 MHz, and USB needs exactly this
         divr: None,
     });
     config.rcc.ahb_pre = AHBPrescaler::DIV1;

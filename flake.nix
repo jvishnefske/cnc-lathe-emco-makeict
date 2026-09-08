@@ -53,6 +53,15 @@
           ];
 
           shellHook = ''
+            # The pre-commit hook lives in .githooks/ so it is version
+            # controlled; .git/hooks is not. Pointing git at it is one command,
+            # and one command nobody runs is a hook nobody has. Set only if it
+            # is unset, so a deliberate choice of somewhere else survives, and
+            # undone with `git config --unset core.hooksPath`.
+            if [ -d .githooks ] && [ -z "$(git config --get core.hooksPath 2>/dev/null)" ]; then
+              git config core.hooksPath .githooks
+              echo "  hooks       : pre-commit rustfmt + clippy enabled (.githooks)"
+            fi
             echo "EMCO PC Turn 50 dev shell"
             echo "  sender/core : cargo test        (native, no browser)"
             echo "  sender/web  : npm ci && npm run dev"

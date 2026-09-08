@@ -20,6 +20,30 @@ __pycache__/
 .venv/
 venv/
 
+# LinuxCNC's own generated output.
+#
+# `basic_sim.tcl` writes a `<something>_cmds.hal` on every start, named after
+# the options it was given, with a timestamp on the first line. Four of them
+# were committed, and the sim rewrites one of them every time the container
+# comes up -- so `git status` was dirty after any run of
+# sim/acceptance-test.py, which reads exactly like a real change during a
+# review. The INI names only `LIB:basic_sim.tcl` and `turret.hal`; none of
+# these is an input to anything.
+*_cmds.hal
+# LinuxCNC's backup of the parameter file, rewritten alongside it.
+*.var.bak
+#
+# NOT ignored, deliberately: `linuxcnc/sim/*/*.var`. LinuxCNC does write to it,
+# but it is also SEEDED -- 5223 is -50, the G54 Z offset that makes the sender,
+# this simulator and the programs in gcode/ agree about where the stock face
+# is. Ignoring it would silently lose that on a fresh clone. If a run changes
+# an offset, that is a real change and git should say so.
+
+# Nix build results and direnv's cache.
+result
+result-*
+.direnv/
+
 # Serial capture transcripts (may contain machine-specific data; commit
 # deliberately into docs/captures/ instead of leaving them loose)
 *.cap

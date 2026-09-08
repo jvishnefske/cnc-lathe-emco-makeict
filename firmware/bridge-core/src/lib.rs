@@ -63,7 +63,7 @@ pub mod record;
 pub mod ring;
 pub mod segment;
 
-pub use record::{flag, kind, Counters, Record, MAX_BYTES, MAX_PAYLOAD, MAX_FRAME};
+pub use record::{flag, kind, Counters, Record, MAX_BYTES, MAX_FRAME, MAX_PAYLOAD};
 pub use ring::Ring;
 pub use segment::{Config, Segmenter};
 

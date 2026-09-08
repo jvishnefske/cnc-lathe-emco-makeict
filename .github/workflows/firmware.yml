@@ -41,9 +41,12 @@ jobs:
       # `thumbv7em-none-eabihf` is the bridge's target. Adding it is seconds;
       # without it the firmware builds would silently not happen and the job
       # would go green having compiled only the host crate.
+      # rustfmt and clippy are in the stable profile already; naming them
+      # means a profile change upstream cannot quietly drop the lint gate.
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: thumbv7em-none-eabihf
+          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -56,7 +59,9 @@ jobs:
           python-version: "3.12"
 
       # One script, so that what CI checks and what a person runs before
-      # pushing cannot drift apart. It builds both feature sets, asserts a
+      # pushing cannot drift apart. It runs rustfmt and clippy over both
+      # firmware crates -- the same two the pre-commit hook runs -- builds both
+      # feature sets, asserts a
       # plausible image size, greps the listen-only image to prove the
       # transmit path is absent from it, greps the transmitting one to prove
       # that absence means something, and runs the decoder against the corpus

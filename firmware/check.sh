@@ -14,6 +14,30 @@ elf="firmware/rs485-bridge/target/thumbv7em-none-eabihf/release/emco-rs485-bridg
 
 step() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 
+# The same two checks the pre-commit hook runs, on the same crates. A hook is
+# skippable with --no-verify and lives on one machine; this is the gate that
+# actually holds, and having both means the hook is a fast local echo of CI
+# rather than a separate opinion.
+#
+# `sender/core` is deliberately absent: it has never been through rustfmt and
+# has ~112 differences waiting, and reformatting it belongs in its own commit
+# rather than in the firmware's gate.
+step "firmware: rustfmt"
+for crate in firmware/bridge-core firmware/rs485-bridge; do
+    (cd "$crate" && cargo fmt --all -- --check)
+done
+echo "ok: both firmware crates are formatted"
+
+step "firmware: clippy, with warnings as errors"
+(cd firmware/bridge-core && cargo clippy --all-targets -- -D warnings)
+# No --all-targets for the bare-metal crate: it pulls in test harnesses that
+# want a `test` crate the target has no copy of, and the failure reads like a
+# broken toolchain. Both feature sets, because the listen-only interlock only
+# means something if the other one compiles too.
+(cd firmware/rs485-bridge && cargo clippy -- -D warnings)
+(cd firmware/rs485-bridge && cargo clippy --no-default-features \
+    --features board-f407-discovery -- -D warnings)
+
 step "bridge-core: the segmentation, the framing and the accounting"
 (cd firmware/bridge-core && cargo test)
 

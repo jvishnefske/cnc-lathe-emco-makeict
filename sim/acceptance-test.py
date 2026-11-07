@@ -14,7 +14,11 @@ machine:
 
 Exit status 0 means pass.
 """
-import linuxcnc, time, sys
+import linuxcnc, os, time, sys
+
+# The example programs, wherever the repository is: /repo in the container,
+# the checkout itself when LinuxCNC runs natively (`nix run .#sim-test-native`).
+GCODE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "gcode")
 
 s = linuxcnc.stat(); c = linuxcnc.command(); e = linuxcnc.error_channel()
 
@@ -75,7 +79,7 @@ if s.tool_in_spindle != 3:
 
 # --- run the tutorial part ---
 c.mode(linuxcnc.MODE_AUTO); c.wait_complete()
-prog = "/repo/gcode/tutorial-part.ngc"
+prog = os.path.normpath(os.path.join(GCODE, "tutorial-part.ngc"))
 print("running", prog)
 c.program_open(prog)
 c.auto(linuxcnc.AUTO_RUN, 0)
@@ -85,7 +89,7 @@ print("  finished, tool:", s.tool_in_spindle,
       "pos X%.3f Z%.3f" % (s.actual_position[0], s.actual_position[2]))
 
 # --- run the stepped shaft (subroutines) ---
-prog = "/repo/gcode/stepped-shaft.ngc"
+prog = os.path.normpath(os.path.join(GCODE, "stepped-shaft.ngc"))
 print("running", prog)
 c.program_open(prog)
 c.auto(linuxcnc.AUTO_RUN, 0)

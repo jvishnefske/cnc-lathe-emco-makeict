@@ -25,18 +25,21 @@ Every time, not just the first time.
 docker compose -f ../sim/compose.yml up
 ```
 
-Then in AXIS: home both axes, open the program, and step through it. The
+Then home both axes, open the program, and step through it — the simulator's
+screen makes the first run of any new or edited program single block anyway. The
 backplot will show you a crash before the machine does.
 
 ## Conventions worth copying into your own programs
 
-- **Start with a retract.** `G53 G0 X48` moves to the retracted position in
+- **Start with a retract.** `G53 G0 X96` moves to the retracted position in
   machine coordinates, whatever work offset happens to be active. It means a
-  program can never begin by ploughing into the part.
+  program can never begin by ploughing into the part. It is X96, not X48,
+  because diameter mode (`G7`) applies to `G53` moves too: the machine's 48 mm
+  of X travel is a radius.
 - **Retract in X before moving in Z**, and before any tool change. The
   6-station turret sweeps a wide circle and will hit the chuck if it indexes
   while it is down near the work.
 - **Stop the spindle before changing tools** (`M5` then `T_ M6`).
 - **Slow down for parting.** It is the operation most likely to grab.
-- **Finish with `G53 G0 X48 Z0`** so the machine is left clear and predictable
+- **Finish with `G53 G0 X96 Z0`** so the machine is left clear and predictable
   for the next person.

@@ -202,6 +202,7 @@ Whether any of the automated accessories (M20–M26, M71/M72) are fitted to this
 ## 8. House style for new programs
 
 Follow `gcode/README.md`; in short: mm, diameter mode, G95 feed-per-rev; open with
-`G53 G0 X48` (retract before anything); retract in X before Z and before tool changes; spindle
-off before indexing; slow down for parting; end at `G53 G0 X48 Z0`. Prove everything in the
+`G53 G0 X96` (retract before anything — X96 because G7 makes the X word a diameter, even on a
+`G53` move; it is X48 only in radius mode); retract in X before Z and before tool changes;
+spindle off before indexing; slow down for parting; end at `G53 G0 X96 Z0`. Prove everything in the
 simulator first — every time.

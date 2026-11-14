@@ -1,0 +1,23 @@
+[package]
+name = "emco-fleet-agent"
+description = "The KD240 fleet agent: polls the fleet server over HTTPS, reports telemetry, and applies owner-signed NixOS updates behind the lathe-service interlock. No machine commands."
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "emco-fleet-agent"
+path = "src/main.rs"
+
+[dependencies]
+emco-fleet-proto.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+emco-fleet-server.workspace = true
+axum.workspace = true
+tokio.workspace = true
+tempfile.workspace = true

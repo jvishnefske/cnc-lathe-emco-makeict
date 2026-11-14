@@ -9,6 +9,7 @@
 //! | route | |
 //! |---|---|
 //! | `GET /` and `/ui/*` | the UI |
+//! | `GET /egui/` | the egui emco_lathe screen (when built, `web/build.sh`) |
 //! | `GET /api/profile` | the machine profile |
 //! | `GET /api/state` | the latest snapshot (`session`, `sim`, `transport`) |
 //! | `GET /api/events` | SSE: `state` snapshots and `core` session events |
@@ -112,6 +113,9 @@ pub fn router(app: Shared) -> Router {
     Router::new()
         .route("/", get(crate::ui::index))
         .route("/ui/{*path}", get(crate::ui::asset))
+        .route("/egui", get(crate::ui::egui_redirect))
+        .route("/egui/", get(crate::ui::egui_index))
+        .route("/egui/{*path}", get(crate::ui::egui_asset))
         .route("/api/profile", get(profile))
         .route("/api/state", get(state))
         .route("/api/events", get(events))

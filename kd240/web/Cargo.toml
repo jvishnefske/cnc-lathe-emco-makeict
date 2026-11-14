@@ -1,0 +1,22 @@
+# The egui operator UI for emco-kd240 (README.md here), a workspace of its
+# own so that neither its dependencies nor its lock file reach the service:
+#
+#   rules/  emco-rules  the emco_lathe screen's decisions, ported from
+#                       linuxcnc/sim/emco-pcturn50/qtvcp/screens/emco_lathe/
+#                       emco_rules.py. Pure: no I/O, no clock.
+#   app/    emco-egui   the screen itself, egui on wasm32 (eframe), talking
+#                       to the service through a transport-agnostic link.
+[workspace]
+resolver = "2"
+members = ["rules", "app"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.1.0"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

@@ -44,6 +44,10 @@ CRATES=(
     "sender/core|--all-targets"
     "firmware/bridge-core|--all-targets"
     "kd240|--all-targets"
+    "kd240/web|--workspace --all-targets"
+    "kd240/web/rules|--all-targets"
+    "kd240/web/app|--all-targets"
+    "kd240/web/app|--target wasm32-unknown-unknown"
     "firmware/rs485-bridge|"
     "firmware/rs485-bridge|--no-default-features --features board-f407-discovery"
 )

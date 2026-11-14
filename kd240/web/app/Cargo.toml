@@ -1,0 +1,31 @@
+[package]
+name = "emco-egui"
+description = "The emco_lathe operator screen as an egui app on wasm32, served by emco-kd240. Talks to the machine through a transport-agnostic link (status, command and error channels, as LinuxCNC's); the kd240 HTTP + SSE API is the one implementation."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+emco-rules = { path = "../rules" }
+emco-sender-core = { path = "../../../sender/core" }
+egui = { version = "0.33", default-features = false, features = ["default_fonts"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# The browser side only exists on wasm32, so native `cargo test` builds the
+# screen's logic and drawing code (plain egui) without eframe or web-sys.
+# wasm-bindgen is pinned to the wasm-bindgen-cli that build.sh runs
+# (`nix shell nixpkgs#wasm-bindgen-cli`): the two must be the same version.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+eframe = { version = "0.33", default-features = false, features = ["glow", "default_fonts"] }
+wasm-bindgen = "=0.2.129"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+  "Document", "Window", "Location", "Storage", "Element", "HtmlCanvasElement", "HtmlInputElement",
+  "EventSource", "MessageEvent", "Event", "File", "FileList", "Blob",
+  "Request", "RequestInit", "RequestMode", "Headers", "Response",
+] }

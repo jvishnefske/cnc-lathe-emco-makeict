@@ -31,6 +31,7 @@ lathe's `X300` bus.
 | Programs | G-code stored as `<data>/programs/<name>.nc`. Loading parses with `sender/core`'s parser and returns diagnostics and the backplot. A program with errors is refused (422). | `src/store.rs`, `src/api.rs` |
 | Capture | The KD240's RS-485 port, read-only, at a bit rate and framing from doc 30 §7's sweep. The output is `emco-bridge-core`'s record stream, byte for byte, so `tools/emco-capture.py --replay` decodes it unchanged. UART framing and parity errors arrive in-band (`PARMRK`) and become the records' flags. | `src/capture.rs`, `src/parmrk.rs` |
 | UI | Program pane, toolpath (sender/web's renderer ported), DRO with the simulator's true position, controls, training faults, capture panel, log. RxJS streams, plain ES modules, no build step, embedded in the binary. | `ui/` |
+| emco_lathe screen | The LinuxCNC simulator's emco_lathe screen ported to egui on wasm32, at `/egui/`: reference gate, belt and spindle limits, the proving ladder, the touch-off wizard. Embedded when built (below). | `web/` |
 
 ### What the capture is and is not
 
@@ -67,9 +68,11 @@ checked yet.
 
 ```sh
 cd kd240
-cargo test                       # 18 tests: unit, the API through the router, and a capture over a pty
+cargo test                       # 19 tests: unit, the API through the router, and a capture over a pty
                                  #   decoded by tools/emco-capture.py (needs python3; skipped without)
 (cd ui && node --test test/)     # 9 tests: the RxJS stream logic and plot math (Node ≥ 18, no npm)
+(cd web && cargo test)           # 69 tests: the emco_lathe rules (25 ported from Python) and the egui screen
+web/build.sh && cargo build      # optional: build the egui screen, then embed it at /egui/
 
 # For the KD240 (aarch64; needs aarch64-linux-gnu-gcc, glibc ≤ 2.34 required)
 rustup target add aarch64-unknown-linux-gnu
@@ -198,6 +201,7 @@ machine. Without one, give the address: `just deploy admin@192.168.1.134`.
 | Route | |
 |---|---|
 | `GET /` | the UI |
+| `GET /egui/` | the emco_lathe screen (egui), when built in; otherwise a page saying how |
 | `GET /api/profile` | the `MachineProfile` |
 | `GET /api/state` | `{ session: SessionState, sim: Dro, transport: "virtual" }` |
 | `GET /api/events` | SSE: `state` (snapshots), `core` (the session's `Event`s), `lagged` (n missed) |
@@ -208,6 +212,52 @@ machine. Without one, give the address: `just deploy admin@192.168.1.134`.
 | `POST /api/sim/fault` | `{"kind": "estop" \| "limit_x" \| "limit_z" \| "turret_jam"}` |
 | `GET /api/capture`, `POST /api/capture/start` `{baud, framing}`, `POST /api/capture/stop` | the capture. The port comes from `--rs485` only |
 | `GET /api/captures`, `GET /api/captures/{name}` | capture files (download) |
+
+## The emco_lathe screen at `/egui/`
+
+`web/` is the LinuxCNC simulator's emco_lathe screen
+(`linuxcnc/sim/emco-pcturn50/qtvcp/screens/emco_lathe/`) as a Rust egui app
+compiled to WebAssembly. It enforces the same routines, and makes the same
+decisions in the same words, because those decisions are a port:
+
+* `web/rules` (`emco-rules`): `emco_rules.py`, line for line. Reference
+  gate, belt ranges and spindle clamp, threading above 400 rpm, the
+  preflight (the proving ladder's first rung), touch-off, proven programs.
+  Pure Rust with no I/O and no clock. Its tests are the Python's 25,
+  ported one for one, and `web/rules/diff_against_python.py` checks the two
+  against each other on random programs (20,000 queries per run, no
+  differences). `src/screen.rs` holds the handler's own decisions: the
+  wizard's steps, cycle start, when a run proves a program, and the
+  spindle watch.
+* `web/app` (`emco-egui`): the screen. It talks to the machine through
+  `MachineLink` (`src/link.rs`), shaped like LinuxCNC's status, command and
+  error channels, so the LinuxCNC step in doc 65 (S4) swaps the link, not
+  the screen. `src/kd240.rs` is the one link, this service's API.
+
+```sh
+web/build.sh       # wasm32 build + wasm-bindgen 0.2.129 (from nix if needed) + wasm-opt; checks it instantiates
+cargo build        # build.rs embeds web/dist/ when it is there; open http://…/egui/
+```
+
+**Why it is embedded only when built.** The service must keep building with
+plain `cargo build` and no wasm toolchain (the board image does exactly
+that). So `build.rs` embeds `web/dist/` (or `$EMCO_EGUI_DIST`) when its
+three files are present. Otherwise it prints a cargo warning, and `/egui/`
+answers 503 with how to build it. `web/dist/` is build output and is not
+committed. In Nix, `nix build .#kd240-egui` builds the screen and
+`.#emco-kd240` builds the service with it embedded
+(`nix/egui.nix`, `nix/wasm-bindgen-cli.nix`). The board's
+`nixosConfiguration` does not embed it yet: it is built from nixos-25.11,
+whose newest wasm-bindgen-cli is 0.2.108, and the crate pins 0.2.129.
+
+**What the virtual machine cannot do, and the screen says so:** it has no
+feed override, so an unproven program's first run is single block at the
+programmed feed, not 25%. It has no tool table, so §9.2's tool X/Z steps are
+greyed out (a G10 L10 would be silently ignored). Work Z0 (§9.1) works,
+through `setWorkOffset`. It has no continuous jog, only increments, and no
+E-stop flag: an `ESTOP` alarm counts as E-stop until Abort resets the
+machine. Proven programs are remembered per browser (`localStorage`), not in
+`~/.config`.
 
 ## Not done yet
 

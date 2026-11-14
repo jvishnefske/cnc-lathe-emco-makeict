@@ -8,6 +8,11 @@ sender/core/pkg/
 firmware/bridge-core/target/
 firmware/rs485-bridge/target/
 
+# The egui screen's build output (kd240/web/build.sh); emco-kd240 embeds it
+# when present, and builds without it (kd240/build.rs).
+kd240/web/dist/
+kd240/web/dist.tmp/
+
 # Node
 node_modules/
 sender/web/dist/

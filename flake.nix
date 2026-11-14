@@ -73,10 +73,20 @@
         lcncPkgs = nixpkgs-linuxcnc.legacyPackages.${system};
         yapps2 = lcncPkgs.python3.pkgs.callPackage ./nix/yapps2.nix { };
         linuxcnc = lcncPkgs.callPackage ./nix/linuxcnc.nix { inherit yapps2; };
+        # The egui screen for emco-kd240 (kd240/web), and the service with
+        # it embedded, for this machine. Built on unstable: the screen needs
+        # wasm-bindgen-cli 0.2.129 (kd240/nix/wasm-bindgen-cli.nix), which
+        # nixos-25.11, the board's system, does not have. The board's
+        # nixosConfiguration still builds the service without the screen.
+        kd240-egui = pkgs.callPackage ./kd240/nix/egui.nix {
+          inherit rust;
+          wasm-bindgen-cli = pkgs.callPackage ./kd240/nix/wasm-bindgen-cli.nix { };
+        };
+        emco-kd240 = pkgs.callPackage ./kd240/nix/package.nix { egui = kd240-egui; };
       in
       {
         packages = {
-          inherit linuxcnc yapps2;
+          inherit linuxcnc yapps2 kd240-egui emco-kd240;
           default = linuxcnc;
         };
 

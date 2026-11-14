@@ -1,0 +1,54 @@
+# The KD240's SD card and its updates over the network (README.md, "The SD
+# card"). Run from kd240/; `just` lists the recipes.
+#
+#   just image                 build the card image  -> result-sd/sd-image/emco-kd240*.img.zst
+#   just flash /dev/sdX        write it to a card (asks first)
+#   just deploy [HOST]         update the running board over SSH
+#   just build-only [HOST]     copy the new system to the board, keep running the old one,
+#                              boot into the new one at the next reboot
+#
+# Everything for the board is aarch64. Building it on an x86-64 host needs
+# qemu-user binfmt (Ubuntu: qemu-user-static) and, once, in
+# /etc/nix/nix.custom.conf (Determinate Nix) or /etc/nix/nix.conf:
+#     extra-platforms = aarch64-linux
+
+host := "admin@kd240.local"
+system := "..#kd240"
+
+default:
+    @just --list
+
+# Build the SD card image (most of it comes from the binary cache).
+image:
+    nix build ..#nixosConfigurations.kd240.config.system.build.sdImage -L -o result-sd
+    @ls -lL result-sd/sd-image/
+
+# Write the image to a whole card, e.g. `just flash /dev/sdb`. Erases it; asks first.
+flash device: image
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dev={{device}}
+    img=$(ls result-sd/sd-image/*.img.zst)
+    [ -b "$dev" ] || { echo "error: $dev is not a block device" >&2; exit 1; }
+    [ "$(lsblk -dno TYPE "$dev")" = disk ] || { echo "error: $dev is a partition; give the whole card" >&2; exit 1; }
+    if findmnt -rno SOURCE | grep -q "^$dev"; then
+        echo "error: something on $dev is mounted; unmount it first:" >&2
+        findmnt -rno SOURCE,TARGET | grep "^$dev" >&2; exit 1
+    fi
+    lsblk -o NAME,SIZE,MODEL,TRAN,MOUNTPOINTS "$dev"
+    read -rp "Everything on $dev will be lost. Type the device name to continue: " answer
+    [ "$answer" = "$dev" ] || { echo "not written."; exit 1; }
+    nix shell nixpkgs#zstd -c zstd -dc "$img" | sudo dd of="$dev" bs=4M status=progress conv=fsync
+    echo "done: put the card in the KD240 and power it; it answers as kd240.local"
+
+# Build the new system here and switch the board to it now.
+deploy target=host:
+    nix run nixpkgs#nixos-rebuild -- switch --flake {{system}} --target-host {{target}} --sudo
+
+# Build and install the new system, but only boot it at the next reboot.
+build-only target=host:
+    nix run nixpkgs#nixos-rebuild -- boot --flake {{system}} --target-host {{target}} --sudo
+
+# The service's bearer token (made on the board at first start).
+token target=host:
+    ssh {{target}} sudo cat /var/lib/emco-kd240/token

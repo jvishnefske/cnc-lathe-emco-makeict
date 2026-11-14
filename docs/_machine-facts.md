@@ -76,10 +76,15 @@ motor current are set by DIP switch `S301`. [PLATE]
 This is the single most important correction in this document.
 
 - The link between the DOS PC and the machine is **RS-485**, driven by the proprietary EMCO
-  **`Y4A013000` "PCCOM" 8-bit ISA card**. [SCHEM]
-- The card is **memory-mapped**: a 4 KB dual-port RAM window in the CC000–CFFFF range
-  (default CC000–CCFFF), jumper-selectable via ST1–ST3, with a selectable IRQ. **It is not a
-  UART**, so there is no byte-stream protocol a normal serial port can emit. [MANUAL]
+  **`Y4A013000` 8-bit ISA card** ("PC-Einschub RS 485" on the schematic; EMCO calls this
+  generation's card the "RS485-Einschubkarte (AC88)", and "PCCOM" is the later **AC95** card,
+  per EMCO's DNC-interface document; doc 31 §4). [SCHEM]
+- The card is **memory-mapped** on the PC side: a **2 KB** dual-port RAM window, one of
+  eight in CC000–CFFFF (default **CC000–CC7FF**), jumper-selectable via ST1–ST3, with a
+  selectable IRQ (manual p.45, IMG_0791; an earlier "4 KB, default CC000–CCFFF" was a
+  misreading). The PC software never sees a UART. **On the wire** the link is probably
+  asynchronous UART framing at an unknown rate, perhaps 9-bit address-mark (doc 31 §5);
+  unmeasured. [MANUAL]
 - Schematic sheet "KOMMUNIKATION RS485": ISA card `Y4A013000` → cable `K1000` → control box
   bulkhead connector **`X300`, which is the rear DB9** → CPU board → SPS 2000. It is a **3-wire
   multidrop bus**. [SCHEM]

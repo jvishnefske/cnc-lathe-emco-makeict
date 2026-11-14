@@ -114,6 +114,63 @@ async fn ui_and_reads_are_open_changes_need_the_token() {
     );
 }
 
+async fn get_with_type(app: &axum::Router, uri: &str) -> (StatusCode, String, Vec<u8>) {
+    let res = app
+        .clone()
+        .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = res.status();
+    let ty = res
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes().to_vec();
+    (status, ty, bytes)
+}
+
+#[tokio::test]
+async fn the_egui_screen_is_served_at_egui_when_built() {
+    let app = app("egui");
+    let res = app
+        .clone()
+        .oneshot(Request::get("/egui").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::PERMANENT_REDIRECT);
+    assert_eq!(res.headers()[header::LOCATION], "/egui/");
+    let (s, ty, html) = get_with_type(&app, "/egui/").await;
+    assert!(ty.starts_with("text/html"), "{ty}");
+    let html = String::from_utf8(html).unwrap();
+    assert_eq!(
+        get_with_type(&app, "/egui/../Cargo.toml").await.0,
+        StatusCode::NOT_FOUND
+    );
+    if !emco_kd240::ui::EGUI_BUILT {
+        // Not built into this binary: the page says how, and nothing else is served.
+        assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(html.contains("web/build.sh"), "{html}");
+        assert_eq!(
+            get_with_type(&app, "/egui/emco_egui_bg.wasm").await.0,
+            StatusCode::NOT_FOUND
+        );
+        return;
+    }
+    assert_eq!(s, StatusCode::OK);
+    assert!(html.contains("emco_canvas") && html.contains("./emco_egui.js"));
+    let (s, ty, js) = get_with_type(&app, "/egui/emco_egui.js").await;
+    assert_eq!(
+        (s, ty.as_str()),
+        (StatusCode::OK, "text/javascript; charset=utf-8")
+    );
+    assert!(String::from_utf8_lossy(&js).contains("emco_egui_bg.wasm"));
+    let (s, ty, wasm) = get_with_type(&app, "/egui/emco_egui_bg.wasm").await;
+    assert_eq!((s, ty.as_str()), (StatusCode::OK, "application/wasm"));
+    assert_eq!(&wasm[..4], b"\0asm", "a WebAssembly module");
+}
+
 #[tokio::test]
 async fn store_load_and_run_a_program() {
     let app = app("run");

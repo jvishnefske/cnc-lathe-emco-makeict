@@ -154,6 +154,13 @@ Each spike is time-boxed, and its result goes in this document.
   and sends its commands. The simulator in `linuxcnc/sim/` is the test
   bench. The safety rule stands: no remote or unattended operation, and
   the UI's abort is advisory.
+  *Prep, 2026-11-14:* the service's pump now runs any `Transport`
+  (`kd240/src/machine.rs`); the virtual machine is one, and
+  `kd240/src/linuxcnc.rs` is a LinuxCNC skeleton over a `Channels` trait
+  shaped like LinuxCNC's Python `stat`/`command`/`error_channel`, tested
+  against a fake. Its design note picks a Python sidecar on a Unix socket
+  as the bridge (over `linuxcncrsh`, and over FFI to NML). Not wired into
+  the service; no LinuxCNC on the board yet.
 
 Under B, S3 becomes: PL stepgen and counter cores, R5F firmware (remoteproc
 plus RPMsg from NixOS), and the R5F turret state machine, all tested

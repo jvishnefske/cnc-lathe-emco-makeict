@@ -1,0 +1,60 @@
+# The fleet server behind an existing Traefik (kd240/fleet/README.md, "Deploy").
+#
+# Needs, in deploy/.env (not committed; see env.example):
+#   FLEET_HOST           the public host name, e.g. fleet.example.com
+#   TRAEFIK_NETWORK      the external docker network Traefik watches
+#   TRAEFIK_ENTRYPOINT   Traefik's HTTPS entry point name (e.g. websecure)
+#   TRAEFIK_CERTRESOLVER Traefik's certificate resolver name (e.g. letsencrypt)
+#
+# and in deploy/secrets/ (not committed; mode 0600, owned by uid 65532):
+#   admin.token          the admin token (raw, or sha256:<hex>)
+#   device-tokens        `<device> sha256:<hex>` lines, from `emco-fleet token`
+#   trusted-keys         the order-signing public key(s), optional but useful
+#
+# The binary cache is ./cache on the host, filled by rsync from the build
+# host, and served read-only at https://$FLEET_HOST/cache/.
+name: emco-fleet
+
+services:
+  fleet:
+    image: ${FLEET_IMAGE:-emco-fleet-server:latest}
+    build:
+      context: ..
+    restart: unless-stopped
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      FLEET_LISTEN: 0.0.0.0:8080
+      FLEET_DATA_DIR: /data
+      FLEET_CACHE_DIR: /cache
+      FLEET_ADMIN_TOKEN_FILE: /run/secrets/admin.token
+      FLEET_DEVICE_TOKENS_FILE: /run/secrets/device-tokens
+      FLEET_TRUSTED_KEYS_FILE: /run/secrets/trusted-keys
+      FLEET_HISTORY: ${FLEET_HISTORY:-500}
+      FLEET_HISTORY_EVERY_S: ${FLEET_HISTORY_EVERY_S:-300}
+    volumes:
+      - fleet-data:/data
+      - ${FLEET_CACHE_PATH:-./cache}:/cache:ro
+      - ./secrets/admin.token:/run/secrets/admin.token:ro
+      - ./secrets/device-tokens:/run/secrets/device-tokens:ro
+      - ./secrets/trusted-keys:/run/secrets/trusted-keys:ro
+    networks: [traefik]
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: ${TRAEFIK_NETWORK:?set TRAEFIK_NETWORK}
+      # One router for the API and the cache (/cache/...): both are this container.
+      traefik.http.routers.emco-fleet.rule: Host(`${FLEET_HOST:?set FLEET_HOST}`)
+      traefik.http.routers.emco-fleet.entrypoints: ${TRAEFIK_ENTRYPOINT:-websecure}
+      traefik.http.routers.emco-fleet.tls: "true"
+      traefik.http.routers.emco-fleet.tls.certresolver: ${TRAEFIK_CERTRESOLVER:?set TRAEFIK_CERTRESOLVER}
+      traefik.http.services.emco-fleet.loadbalancer.server.port: "8080"
+
+volumes:
+  fleet-data:
+
+networks:
+  traefik:
+    external: true
+    name: ${TRAEFIK_NETWORK:?set TRAEFIK_NETWORK}

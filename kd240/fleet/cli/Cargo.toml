@@ -1,0 +1,12 @@
+[package]
+name = "emco-fleet"
+description = "The build host's fleet tool: make keys and tokens, sign and publish update manifests and commands, show devices. The signing key never leaves this machine."
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+emco-fleet-proto.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+ureq.workspace = true

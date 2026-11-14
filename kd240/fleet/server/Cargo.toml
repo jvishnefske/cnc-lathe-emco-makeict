@@ -1,0 +1,24 @@
+[package]
+name = "emco-fleet-server"
+description = "The KD240 fleet server: per-device telemetry and a relay for signed update manifests and commands, with a static Nix binary cache. Never holds the signing key."
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "emco-fleet-server"
+path = "src/main.rs"
+
+[dependencies]
+emco-fleet-proto.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+axum.workspace = true
+tokio.workspace = true
+tower-http = { version = "0.6", features = ["fs"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

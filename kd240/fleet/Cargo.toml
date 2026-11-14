@@ -1,0 +1,35 @@
+# The KD240 fleet service (README.md here): telemetry and signed software
+# updates, a workspace of its own so that neither its dependencies nor its
+# lock file reach the board's emco-kd240 service.
+#
+#   proto/   emco-fleet-proto   messages, ed25519 signing, tokens, and the
+#                               board's safety policy as pure functions
+#   server/  emco-fleet-server  the axum server behind Traefik; stores and
+#                               relays signed orders, never holds the key
+#   agent/   emco-fleet-agent   runs on the board: polls, verifies, applies
+#   cli/     emco-fleet         the build host's tool: keygen, publish,
+#                               command, devices
+[workspace]
+resolver = "2"
+members = ["proto", "server", "agent", "cli"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.1.0"
+
+[workspace.dependencies]
+emco-fleet-proto = { path = "proto" }
+emco-fleet-server = { path = "server" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive", "env"] }
+ureq = { version = "3", features = ["json"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "signal", "time"] }
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

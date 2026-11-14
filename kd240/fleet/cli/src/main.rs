@@ -268,12 +268,29 @@ fn deliver(sign: &Signing, remote: &Remote, env: Envelope, method: &str, what: &
     Ok(())
 }
 
-/// Device-reported text, made safe for the admin's terminal: every control
-/// character (C0, DEL, C1, so no ESC/CSI sequences) is shown escaped.
+/// Characters that change how a line reads without being visible: format
+/// characters (bidi embeddings, overrides and isolates, zero-width marks,
+/// BOM), line and paragraph separators, and private-use code points.
+fn invisible(c: char) -> bool {
+    matches!(c,
+        '\u{00AD}' | '\u{061C}' | '\u{180E}'
+        | '\u{200B}'..='\u{200F}'
+        | '\u{2028}'..='\u{202E}'
+        | '\u{2060}'..='\u{206F}'
+        | '\u{FEFF}'
+        | '\u{FFF9}'..='\u{FFFB}'
+        | '\u{E000}'..='\u{F8FF}'
+        | '\u{F0000}'..='\u{10FFFF}'
+        | '\u{E0000}'..='\u{E007F}')
+}
+
+/// Device-reported text, made safe for the admin's terminal: control
+/// characters (C0, DEL, C1, so no ESC/CSI sequences) and [`invisible`] ones
+/// are shown escaped, so a board can't redraw or reorder what is printed.
 fn clean(s: &str) -> String {
     s.chars()
         .flat_map(|c| -> Box<dyn Iterator<Item = char>> {
-            if c.is_control() {
+            if c.is_control() || invisible(c) {
                 Box::new(c.escape_unicode())
             } else {
                 Box::new(std::iter::once(c))
@@ -517,5 +534,12 @@ mod clean_tests {
         assert_eq!(clean("a\x1b[2Jb"), "a\\u{1b}[2Jb");
         assert_eq!(clean("x\u{9b}31m\x07\n"), "x\\u{9b}31m\\u{7}\\u{a}");
         assert_eq!(clean("Ø 6.18.37"), "Ø 6.18.37");
+        // Right-to-left override: "done" would display in place of "enod".
+        assert_eq!(clean("\u{202e}enod"), "\\u{202e}enod");
+        assert_eq!(
+            clean("ok\u{200b}\u{2066}\u{feff}"),
+            "ok\\u{200b}\\u{2066}\\u{feff}"
+        );
+        assert_eq!(clean("\u{e000}\u{2028}"), "\\u{e000}\\u{2028}");
     }
 }

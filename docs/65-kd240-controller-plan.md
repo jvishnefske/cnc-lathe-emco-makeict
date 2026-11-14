@@ -141,6 +141,19 @@ Each spike is time-boxed, and its result goes in this document.
   kernel's FPGA manager with a device-tree overlay, as a NixOS service, so
   PL designs ship through `nixos-rebuild` like everything else. Pass: a
   scope sees the PL pin toggle.
+  *Progress, 2026-11-14 (no bitstream: no Vivado on the build host yet):*
+  on the board, `/sys/class/fpga_manager/fpga0` is "Xilinx ZynqMP FPGA
+  Manager" in state `unknown` (PL not configured), `zynqmp_fpga`,
+  `fpga_region` and `of_fpga_region` are loaded, the tree has the region
+  `fpga_full` (`/fpga-region`) and keeps `__symbols__`, and the kernel has
+  `OF_OVERLAY`. Mainline has no userspace way to apply an overlay (the
+  configfs interface is out of tree), so `kd240/nix/pl.nix` (off by
+  default) loads a twenty-line module, `emco_pl_overlay`, that applies one
+  `.dtbo` from the firmware path and removes it on unload; the region
+  driver then programs the `firmware-name` bitstream. The module builds
+  for the RT kernel. Its check mode applies an overlay without a bitstream.
+  Neither has run on the board yet; programming a real design waits on
+  Vivado.
 - **S3, HostMot2 on the K24 (decides D3).** Build HostMot2 for the K24's
   fabric with a pin file for the step 2 budget: 2–3 stepgens, one encoder,
   GPIO. Load it per S2, and run LinuxCNC with `hm2_soc_ol` against the

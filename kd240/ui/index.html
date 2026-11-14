@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>EMCO PC Turn 50 — KD240</title>
+    <link rel="stylesheet" href="/ui/style.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <strong>EMCO PC Turn 50</strong>
+      <span class="badge sim" title="The RS-485 protocol is unknown (docs/30-serial-protocol.md); this service drives sender/core's virtual machine only.">SIMULATED MACHINE</span>
+      <span id="conn" class="badge off">disconnected</span>
+      <span class="spacer"></span>
+      <label class="token">token <input id="token" type="password" autocomplete="off" placeholder="bearer token" /></label>
+    </header>
+    <div class="safety" role="note">
+      Nothing on this page moves the real lathe: the machine bus protocol is unknown, and this service never
+      transmits on it. Abort is <b>advisory</b>, not a safety function — the stop is the cabinet's
+      EMERGENCY-OFF and mains switch, with a person at the machine. Never run it unattended or remotely.
+    </div>
+
+    <main class="main-grid">
+      <section class="panel area-prog">
+        <h2>Program</h2>
+        <div class="row">
+          <select id="programs" aria-label="stored programs"></select>
+          <input id="file" type="file" accept=".nc,.ngc,.txt,.tap,text/plain" aria-label="upload a program" />
+        </div>
+        <div class="row">
+          <input id="name" placeholder="name" maxlength="64" aria-label="program name" />
+          <button id="save">Save</button>
+          <button id="load" class="primary">Load</button>
+          <button id="delete" class="quiet">Delete</button>
+        </div>
+        <textarea id="editor" spellcheck="false" aria-label="program text" placeholder="G-code…"></textarea>
+        <ul id="diagnostics" class="diags"></ul>
+        <h3>Loaded: <span id="loaded-name">—</span></h3>
+        <ol id="listing" class="listing"></ol>
+      </section>
+
+      <section class="panel area-plot">
+        <canvas id="plot" aria-label="toolpath"></canvas>
+        <div class="legend">feed <i class="feed"></i> rapid <i class="rapid"></i> done <i class="done"></i> tool <i class="tool"></i> sim truth <i class="truth"></i></div>
+      </section>
+
+      <aside class="area-side">
+        <section class="panel">
+          <h2>State <span id="run" class="run">—</span></h2>
+          <dl class="kv">
+            <dt>line</dt><dd id="st-line">—</dd>
+            <dt>tool</dt><dd id="st-tool">—</dd>
+            <dt>spindle</dt><dd id="st-spindle">—</dd>
+            <dt>feed</dt><dd id="st-feed">—</dd>
+            <dt>modal</dt><dd id="st-modal">—</dd>
+          </dl>
+          <ul id="alarms" class="alarms"></ul>
+        </section>
+
+        <section class="panel dro">
+          <div><span>X⌀</span><b id="dro-xd">—</b></div>
+          <div><span>X r</span><b id="dro-xr">—</b></div>
+          <div><span>Z</span><b id="dro-z">—</b></div>
+          <div class="small"><span>work X⌀ / Z</span><b id="dro-work">—</b></div>
+          <div class="small"><span>homed</span><b id="dro-homed">—</b></div>
+          <div class="small" id="drift-row" hidden><span>lost position</span><b id="dro-drift">—</b></div>
+        </section>
+
+        <section class="panel">
+          <div class="buttons">
+            <button data-cmd="run" class="primary">Run</button>
+            <button data-cmd="hold">Hold</button>
+            <button data-cmd="resume">Resume</button>
+            <button data-cmd="home">Home</button>
+            <button data-cmd="abort" class="danger" title="Advisory only: the real stop is EMERGENCY-OFF at the cabinet">Abort <small>(advisory)</small></button>
+          </div>
+          <div class="row">
+            <label><input id="single" type="checkbox" /> single block</label>
+            <label><input id="dry" type="checkbox" /> dry run</label>
+          </div>
+          <div class="jog">
+            <button data-jog="x+" aria-label="jog X plus">X+</button>
+            <button data-jog="z-" aria-label="jog Z minus">Z−</button>
+            <button data-jog="z+" aria-label="jog Z plus">Z+</button>
+            <button data-jog="x-" aria-label="jog X minus">X−</button>
+            <select id="jog-step" aria-label="jog step">
+              <option value="0.01">0.01 mm</option>
+              <option value="0.1">0.1 mm</option>
+              <option value="1" selected>1 mm</option>
+              <option value="10">10 mm</option>
+            </select>
+            <input id="jog-feed" type="number" value="200" min="1" max="750" step="10" aria-label="jog feed mm/min" />
+          </div>
+          <form id="mdi-form" class="row">
+            <input id="mdi" placeholder="MDI, e.g. G00 X10 Z2" aria-label="MDI block" />
+            <button>Send</button>
+          </form>
+        </section>
+
+        <section class="panel">
+          <h2>Training faults</h2>
+          <div class="buttons">
+            <button data-fault="estop">E-stop</button>
+            <button data-fault="limit_x">Limit X</button>
+            <button data-fault="limit_z">Limit Z</button>
+            <button data-fault="turret_jam">Turret jam</button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>RS-485 capture <small>listen-only</small></h2>
+          <p class="note">
+            Reads the KD240's RS-485 port read-only, in the capture bridge's record format
+            (<code>tools/emco-capture.py --replay</code>). Timestamps are host read times — good for "is the
+            bus silent?" and error positions, not for timing (doc 30 §4 rung 2).
+          </p>
+          <div class="row">
+            <select id="cap-baud" aria-label="bit rate"></select>
+            <select id="cap-framing" aria-label="framing">
+              <option>8N1</option><option>7E1</option><option>8E1</option><option>7O1</option><option>8N2</option>
+            </select>
+            <button id="cap-start">Start</button>
+            <button id="cap-stop">Stop</button>
+          </div>
+          <div id="cap-status" class="note">—</div>
+          <ul id="captures" class="captures"></ul>
+        </section>
+      </aside>
+
+      <section class="panel area-cons">
+        <h2>Log <label class="small"><input id="raw" type="checkbox" /> bytes</label></h2>
+        <pre id="log" class="log"></pre>
+      </section>
+    </main>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+    <script src="/ui/vendor/rxjs-7.8.2.umd.min.js"></script>
+    <script type="module" src="/ui/app.js"></script>
+  </body>
+</html>

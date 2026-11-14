@@ -15,6 +15,15 @@
   };
 
   outputs = { self, nixpkgs, nixpkgs-linuxcnc, flake-utils, rust-overlay }:
+    {
+      # The Kria KD240's SD card and its over-the-network updates
+      # (kd240/nix/configuration.nix). On the stable release, like LinuxCNC:
+      #   nix build .#nixosConfigurations.kd240.config.system.build.sdImage
+      #   nixos-rebuild switch --flake .#kd240 --target-host admin@kd240.local --sudo
+      nixosConfigurations.kd240 = nixpkgs-linuxcnc.lib.nixosSystem {
+        modules = [ ./kd240/nix/configuration.nix ];
+      };
+    } //
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs {

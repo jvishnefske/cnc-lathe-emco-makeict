@@ -268,19 +268,33 @@ fn deliver(sign: &Signing, remote: &Remote, env: Envelope, method: &str, what: &
     Ok(())
 }
 
+/// Device-reported text, made safe for the admin's terminal: every control
+/// character (C0, DEL, C1, so no ESC/CSI sequences) is shown escaped.
+fn clean(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| -> Box<dyn Iterator<Item = char>> {
+            if c.is_control() {
+                Box::new(c.escape_unicode())
+            } else {
+                Box::new(std::iter::once(c))
+            }
+        })
+        .collect()
+}
+
 fn short(path: &Option<String>) -> String {
     match path {
-        Some(p) => p
-            .strip_prefix("/nix/store/")
-            .and_then(|r| r.get(33..))
-            .unwrap_or(p)
-            .to_string(),
+        Some(p) => clean(
+            p.strip_prefix("/nix/store/")
+                .and_then(|r| r.get(33..))
+                .unwrap_or(p),
+        ),
         None => "-".into(),
     }
 }
 
 fn print_summary(s: &DeviceSummary, now: u64) {
-    println!("{}", s.device);
+    println!("{}", clean(&s.device));
     let Some(l) = &s.latest else {
         println!("  never seen");
         return;
@@ -291,7 +305,7 @@ fn print_summary(s: &DeviceSummary, now: u64) {
         now.saturating_sub(l.at),
         l.last_seq
     );
-    println!("  lathe      {}", t.run_state);
+    println!("  lathe      {}", clean(&t.run_state));
     println!("  current    {}", short(&t.current_system));
     if t.booted_system != t.current_system {
         println!("  booted     {}", short(&t.booted_system));
@@ -302,7 +316,11 @@ fn print_summary(s: &DeviceSummary, now: u64) {
     if t.available_system.is_some() && t.available_system != t.current_system {
         println!("  available  {}", short(&t.available_system));
     }
-    println!("  kernel     {} {}", t.kernel_release, t.kernel_version);
+    println!(
+        "  kernel     {} {}",
+        clean(&t.kernel_release),
+        clean(&t.kernel_version)
+    );
     println!(
         "  up {}h{:02}m  load {:.2} {:.2} {:.2}  mem {}/{} MiB free  failed units {}",
         t.uptime_s / 3600,
@@ -317,7 +335,7 @@ fn print_summary(s: &DeviceSummary, now: u64) {
     for temp in &t.temps {
         println!(
             "  temp       {} {:.1} C",
-            temp.name,
+            clean(&temp.name),
             temp.milli_c as f64 / 1000.0
         );
     }
@@ -328,14 +346,19 @@ fn print_summary(s: &DeviceSummary, now: u64) {
             Outcome::Rejected => "REJECTED",
             Outcome::Failed => "FAILED",
         };
-        println!("  result     seq {} {} {o}: {}", r.seq, r.what, r.detail);
+        println!(
+            "  result     seq {} {} {o}: {}",
+            r.seq,
+            clean(&r.what),
+            clean(&r.detail)
+        );
     }
     if !s.pending_commands.is_empty() {
         let seqs: Vec<String> = s
             .pending_commands
             .iter()
             .filter_map(|e| e.unverified_order().ok())
-            .map(|o| format!("{} {}", o.what(), o.seq()))
+            .map(|o| format!("{} {}", clean(o.what()), o.seq()))
             .collect();
         println!("  queued     {}", seqs.join(", "));
     }
@@ -481,5 +504,18 @@ fn main() {
     if let Err(e) = run(Cli::parse()) {
         eprintln!("emco-fleet: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod clean_tests {
+    use super::clean;
+
+    #[test]
+    fn device_text_cannot_drive_the_terminal() {
+        assert_eq!(clean("idle"), "idle");
+        assert_eq!(clean("a\x1b[2Jb"), "a\\u{1b}[2Jb");
+        assert_eq!(clean("x\u{9b}31m\x07\n"), "x\\u{9b}31m\\u{7}\\u{a}");
+        assert_eq!(clean("Ø 6.18.37"), "Ø 6.18.37");
     }
 }

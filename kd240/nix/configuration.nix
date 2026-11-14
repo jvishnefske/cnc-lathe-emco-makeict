@@ -31,7 +31,7 @@
 # /boot, exactly where boot.scr points U-Boot, and the previous generations
 # stay selectable at the U-Boot menu (serial console) as the way back from
 # a bad update.
-{ config, lib, pkgs, modulesPath, ... }:
+{ config, lib, pkgs, modulesPath, kd240Egui, ... }:
 
 let
   bootLabel = "KD240BOOT";
@@ -92,6 +92,10 @@ in
         # its unused-option check passes.
         structuredExtraConfig = with lib.kernel; {
           USB_ONBOARD_DEV_USB5744 = yes;
+          # Doc 65 S1: the fully preemptible kernel LinuxCNC's servo thread
+          # needs. Mainline since 6.12 (arm64 included); it sits beside the
+          # preemption-model choice, so nixpkgs' PREEMPT_LAZY stays.
+          PREEMPT_RT = yes;
           RUST = lib.mkForce unset;
           DRM_NOVA = lib.mkForce unset;
           NOVA_CORE = lib.mkForce unset;
@@ -220,7 +224,8 @@ in
 
   services.emco-kd240 = {
     enable = true;
-    package = pkgs.callPackage ./package.nix { };
+    # With the egui screen at /egui/ (flake.nix, specialArgs).
+    package = pkgs.callPackage ./package.nix { egui = kd240Egui; };
     # PS UART0. The KD240 device tree runs it in RS-485 mode
     # (linux,rs485-enabled-at-boot-time) with the transceiver's DE on
     # rts-gpios, so Linux asserts DE only while transmitting, and the
@@ -229,5 +234,9 @@ in
     rs485 = "/dev/ttyPS0";
   };
 
-  environment.systemPackages = with pkgs; [ picocom usbutils pciutils i2c-tools python3 ];
+  environment.systemPackages = with pkgs; [
+    picocom usbutils pciutils i2c-tools python3
+    # cyclictest and friends, and a load to run them under (doc 65 S1).
+    rt-tests stress-ng
+  ];
 }

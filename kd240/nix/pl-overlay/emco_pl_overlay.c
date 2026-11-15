@@ -65,3 +65,11 @@ module_init(emco_pl_overlay_init);
 module_exit(emco_pl_overlay_exit);
 MODULE_DESCRIPTION("Apply a DT overlay (FPGA region + bitstream) from the firmware path");
 MODULE_LICENSE("GPL");
+/*
+ * The region driver must be bound before the overlay goes in: its notifier
+ * is what programs the bitstream, and an overlay applied before it probes
+ * is accepted with nothing to act on it (seen on the KD240: applied at
+ * 23.8 s, "FPGA Region probed" at 28.0 s). modprobe loads these first;
+ * pl.nix also waits for the region to appear.
+ */
+MODULE_SOFTDEP("pre: zynqmp-fpga of-fpga-region");

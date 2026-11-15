@@ -136,6 +136,19 @@ Each spike is time-boxed, and its result goes in this document.
   (one more option in the cross-compiled kernel) and deploy it. Pass:
   `cyclictest` worst case under load, comparable to doc 60 R8's 1 ms
   servo-thread budget.
+  *Result, 2026-11-14:* the board boots the PREEMPT_RT kernel unaided
+  (`uname -v`: `#1-NixOS SMP PREEMPT_RT`; console log of the boot kept,
+  no failed units). `cyclictest -m -S -p 90 -i 1000 -h 1000 -D 300`, one
+  thread per A53 core at a 1 ms period, 5 minutes each:
+
+  | Load | Min (µs) | Avg (µs) | **Max (µs)**, per core | Overflows (>1 ms) |
+  |---|---|---|---|---|
+  | idle | 8 | 30–33 | 138, 195, 93, 110 → **195** | 0 |
+  | `stress-ng --cpu 4 --io 2 --vm 2 --vm-bytes 128M` (load average 8) | 10–11 | 17–19 | 80, 96, 123, 158 → **158** | 0 |
+
+  The worst case is under 20 % of the 1 ms servo-thread budget. Five
+  minutes is a smoke test, not a qualification: an overnight run, with
+  the USB, Ethernet and SD load the real system has, is still to do.
 - **S2, programmable logic from NixOS.** Load a trivial bitstream (a PL GPIO
   blinker, or a counter on the encoder header) at runtime through the
   kernel's FPGA manager with a device-tree overlay, as a NixOS service, so
@@ -152,8 +165,14 @@ Each spike is time-boxed, and its result goes in this document.
   `.dtbo` from the firmware path and removes it on unload; the region
   driver then programs the `firmware-name` bitstream. The module builds
   for the RT kernel. Its check mode applies an overlay without a bitstream.
-  Neither has run on the board yet; programming a real design waits on
-  Vivado.
+  *On the board, same day:* in check mode, `emco-pl.service` applies the
+  overlay at boot, the check node appears under `/fpga-region`, the PL
+  stays unconfigured, and stopping the unit removes the overlay again. The
+  first boot showed the overlay applied 4 s *before* the region driver
+  probed, which with a real bitstream would have programmed nothing; the
+  module now soft-depends on `zynqmp-fpga` and `of-fpga-region`, and the
+  unit waits for `region0`, so the region probes first (23.9 s, overlay
+  24.2 s). Programming a real design waits on Vivado.
 - **S3, HostMot2 on the K24 (decides D3).** Build HostMot2 for the K24's
   fabric with a pin file for the step 2 budget: 2–3 stepgens, one encoder,
   GPIO. Load it per S2, and run LinuxCNC with `hm2_soc_ol` against the

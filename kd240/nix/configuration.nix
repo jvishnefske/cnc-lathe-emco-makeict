@@ -57,6 +57,7 @@ in
   imports = [
     "${modulesPath}/installer/sd-card/sd-image.nix"
     ./service.nix
+    ./pl.nix
   ];
 
   nixpkgs.hostPlatform = "aarch64-linux";
@@ -233,6 +234,10 @@ in
     # the UI.
     rs485 = "/dev/ttyPS0";
   };
+
+  # Doc 65 S2: the PL loader, in check mode until there is a bitstream (an
+  # overlay with no firmware-name, so the PL is left alone; pl.nix).
+  services.emco-pl.enable = true;
 
   environment.systemPackages = with pkgs; [
     picocom usbutils pciutils i2c-tools python3

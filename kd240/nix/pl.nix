@@ -107,6 +107,18 @@ in
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
+        # The region driver's notifier is what programs the PL, so it must
+        # have probed before the overlay is applied (the module's softdep
+        # loads it; probing can still be deferred behind the FPGA manager).
+        ExecStartPre = pkgs.writeShellScript "emco-pl-wait-region" ''
+          ${pkgs.kmod}/bin/modprobe -a zynqmp-fpga of-fpga-region
+          for _ in $(${pkgs.coreutils}/bin/seq 300); do
+            [ -e /sys/class/fpga_region/region0 ] && exit 0
+            ${pkgs.coreutils}/bin/sleep 0.1
+          done
+          echo "emco-pl: no FPGA region after 30 s" >&2
+          exit 1
+        '';
         ExecStart = "${pkgs.kmod}/bin/modprobe emco_pl_overlay overlay=${cfg.name}.dtbo";
         ExecStop = "${pkgs.kmod}/bin/modprobe -r emco_pl_overlay";
       };

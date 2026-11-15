@@ -247,8 +247,11 @@ answers 503 with how to build it. `web/dist/` is build output and is not
 committed. In Nix, `nix build .#kd240-egui` builds the screen and
 `.#emco-kd240` builds the service with it embedded
 (`nix/egui.nix`, `nix/wasm-bindgen-cli.nix`). The board's
-`nixosConfiguration` does not embed it yet: it is built from nixos-25.11,
-whose newest wasm-bindgen-cli is 0.2.108, and the crate pins 0.2.129.
+`nixosConfiguration` is built from nixos-25.11, whose newest
+wasm-bindgen-cli (0.2.108) is older than the 0.2.129 the crate pins, so the
+flake builds the screen on unstable for the deploy host and hands it to the
+board's configuration (`specialArgs.kd240Egui`); wasm32 output is the same
+on every platform.
 
 **What the virtual machine cannot do, and the screen says so:** it has no
 feed override, so an unproven program's first run is single block at the
@@ -261,11 +264,15 @@ machine. Proven programs are remembered per browser (`localStorage`), not in
 
 ## Not done yet
 
-* **On hardware:** nothing has run on a KD240 yet. Still to check there: the
-  binary under Kria Ubuntu, the RS-485 tty and its DE behaviour, and a
-  capture at `X300` (doc 30 §7 metering first).
-* **The UI in a browser:** the page is served and its stream logic is
-  tested under Node, but no browser has rendered it yet.
+* **On hardware:** the service runs on the KD240 under NixOS (both UIs,
+  the PREEMPT_RT kernel; doc 65 §3). Still to check there: the RS-485 tty
+  and its DE behaviour, and a capture at `X300` (doc 30 §7 metering first).
+* **The UIs in a browser:** `/egui/` has rendered from the board in
+  headless Chromium 156 (WebGL2 via SwiftShader, 2026-11-15): connected over
+  SSE, live DRO, the belt question at machine-on and the "Home All first"
+  gate, read only. Not yet exercised: commands with a token, a desktop GPU,
+  and a phone or tablet browser. The RxJS UI at `/` is tested under Node
+  only.
 * **The R5F, evaluated later:** the useful job for the KD240's Cortex-R5F is
   the timing this capture lacks. It would timestamp each byte in hardware
   from the UART interrupt, with direction and error flags, and hand the

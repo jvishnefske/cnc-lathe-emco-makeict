@@ -146,9 +146,14 @@ Each spike is time-boxed, and its result goes in this document.
   | idle | 8 | 30–33 | 138, 195, 93, 110 → **195** | 0 |
   | `stress-ng --cpu 4 --io 2 --vm 2 --vm-bytes 128M` (load average 8) | 10–11 | 17–19 | 80, 96, 123, 158 → **158** | 0 |
 
-  The worst case is under 20 % of the 1 ms servo-thread budget. Five
-  minutes is a smoke test, not a qualification: an overnight run, with
-  the USB, Ethernet and SD load the real system has, is still to do.
+  | the same `stress-ng` load, **3 hours** | 9–10 | 16–19 | 171, 212, 246, 204 → **246** | 0 |
+
+  In the 3-hour run, 10 of about 43 million wakeups took 200 µs or more,
+  and none took over 1 ms. The worst case is a quarter of the 1 ms
+  servo-thread budget. Not yet measured: a run with the load the real
+  system adds (USB, Ethernet and SD traffic, the PL's interrupts, LinuxCNC
+  itself), and with the RT threads pinned to an isolated core
+  (`isolcpus`), which is how LinuxCNC is normally run.
 - **S2, programmable logic from NixOS.** Load a trivial bitstream (a PL GPIO
   blinker, or a counter on the encoder header) at runtime through the
   kernel's FPGA manager with a device-tree overlay, as a NixOS service, so

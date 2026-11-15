@@ -22,6 +22,11 @@
       #   nixos-rebuild switch --flake .#kd240 --target-host admin@kd240.local --sudo
       nixosConfigurations.kd240 = nixpkgs-linuxcnc.lib.nixosSystem {
         modules = [ ./kd240/nix/configuration.nix ];
+        # The egui screen, built on unstable for the deploy host (it needs a
+        # wasm-bindgen-cli 25.11 lacks). wasm32 is the same on every
+        # platform, so the board's aarch64 service embeds this build. The
+        # host is x86-64 Linux already, for the cross-compiled kernel.
+        specialArgs.kd240Egui = self.packages.x86_64-linux.kd240-egui;
       };
     } //
     flake-utils.lib.eachDefaultSystem (system:

@@ -9,6 +9,7 @@
  */
 
 import type { CoreApi, ProgramApi, SessionApi, VirtualMachineApi } from "./api";
+import { DEFAULT_PROFILE } from "../profile";
 import type {
   Backplot,
   Command,
@@ -29,6 +30,7 @@ type WasmModule = {
   };
   Session: new (profile: unknown) => WasmSession;
   VirtualMachine: new (profile: unknown) => WasmVm;
+  defaultProfile(): unknown;
 };
 type WasmProgram = {
   line_count(): number;
@@ -119,6 +121,12 @@ class WasmCore implements CoreApi {
   }
   createVirtualMachine(profile: MachineProfile): VirtualMachineApi {
     return new WasmVmAdapter(new this.mod.VirtualMachine(profile));
+  }
+  defaultProfile(): MachineProfile {
+    // The core's numbers; the browser sender talks to its loopback virtual
+    // machine, so it keeps its own dialect and link.
+    const core = this.mod.defaultProfile() as MachineProfile;
+    return { ...core, dialect: DEFAULT_PROFILE.dialect, link: DEFAULT_PROFILE.link };
   }
 }
 

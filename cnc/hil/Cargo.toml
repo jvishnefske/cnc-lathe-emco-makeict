@@ -1,0 +1,21 @@
+[package]
+name = "cnc-hil"
+description = "The lathe's payloads as built (wasm32), run in mw-posix-node's controller against its simulated lathe: the host-in-the-loop tests."
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[build-dependencies]
+# None: build.rs runs cargo for the payloads' wasm32 build.
+
+[dev-dependencies]
+mw-posix-node.workspace = true
+mwctl.workspace = true
+middleware = { workspace = true, features = ["std"] }
+recipe-core.workspace = true
+cnc-model = { workspace = true, features = ["alloc"] }
+sha2 = "0.10"
+serde_json.workspace = true
+cnc-process = { path = "../process" }
+

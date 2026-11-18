@@ -127,11 +127,20 @@ impl PlainGcode {
             return Some(DialectEvent::Ack);
         }
         if lower.starts_with("error") {
-            let msg = t["error".len()..].trim_start_matches([':', ' ']).to_string();
-            let msg = if msg.is_empty() { "error".to_string() } else { msg };
+            let msg = t["error".len()..]
+                .trim_start_matches([':', ' '])
+                .to_string();
+            let msg = if msg.is_empty() {
+                "error".to_string()
+            } else {
+                msg
+            };
             return Some(DialectEvent::Nak { message: msg });
         }
-        if let Some(rest) = t.strip_prefix("alarm:").or_else(|| t.strip_prefix("ALARM:")) {
+        if let Some(rest) = t
+            .strip_prefix("alarm:")
+            .or_else(|| t.strip_prefix("ALARM:"))
+        {
             let rest = rest.trim();
             let mut parts = rest.splitn(2, ' ');
             let code = parts.next().unwrap_or("").to_string();
@@ -175,7 +184,9 @@ impl Dialect for PlainGcode {
                 }
                 0x15 => {
                     self.outstanding = self.outstanding.saturating_sub(1);
-                    events.push(DialectEvent::Nak { message: "NAK".to_string() });
+                    events.push(DialectEvent::Nak {
+                        message: "NAK".to_string(),
+                    });
                 }
                 b'\r' | b'\n' => {
                     let line = std::mem::take(&mut self.line_buf);
@@ -257,7 +268,9 @@ pub struct EmcoStub {
 
 impl EmcoStub {
     pub fn new() -> EmcoStub {
-        EmcoStub { inner: PlainGcode::new() }
+        EmcoStub {
+            inner: PlainGcode::new(),
+        }
     }
 }
 
@@ -337,7 +350,10 @@ mod tests {
         let mut d = PlainGcode::new();
         assert!(d.wants_next_block());
         d.note_block_sent();
-        assert!(!d.wants_next_block(), "one block outstanding blocks the next");
+        assert!(
+            !d.wants_next_block(),
+            "one block outstanding blocks the next"
+        );
         let ev = d.feed_rx(b"ok\r\n");
         assert_eq!(ev, vec![DialectEvent::Ack]);
         assert!(d.wants_next_block());
@@ -358,7 +374,12 @@ mod tests {
         let mut d = PlainGcode::new();
         d.note_block_sent();
         let ev = d.feed_rx(b"error: soft limit Z\r");
-        assert_eq!(ev, vec![DialectEvent::Nak { message: "soft limit Z".to_string() }]);
+        assert_eq!(
+            ev,
+            vec![DialectEvent::Nak {
+                message: "soft limit Z".to_string()
+            }]
+        );
         assert!(d.wants_next_block(), "nak releases the outstanding slot");
     }
 
@@ -404,7 +425,9 @@ mod tests {
         d.note_block_sent();
         assert_eq!(
             d.feed_rx(&[0x15]),
-            vec![DialectEvent::Nak { message: "NAK".to_string() }]
+            vec![DialectEvent::Nak {
+                message: "NAK".to_string()
+            }]
         );
     }
 
@@ -412,7 +435,10 @@ mod tests {
     fn unknown_chatter_becomes_text_events() {
         let mut d = PlainGcode::new();
         let ev = d.feed_rx(b"EMCO PC TURN 50 READY\r\n");
-        assert_eq!(ev, vec![DialectEvent::Text("EMCO PC TURN 50 READY".to_string())]);
+        assert_eq!(
+            ev,
+            vec![DialectEvent::Text("EMCO PC TURN 50 READY".to_string())]
+        );
     }
 
     #[test]

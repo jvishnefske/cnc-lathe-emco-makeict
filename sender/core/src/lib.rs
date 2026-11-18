@@ -16,5 +16,5 @@ pub mod machine;
 pub mod profile;
 pub mod session;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "bindgen"))]
 pub mod wasm;

@@ -2,8 +2,9 @@
 
 The machine's original control software (`FANOT`, installed at `C:\PCNC`
 on a DOS PC) drove the lathe through a proprietary **memory-mapped 8-bit
-ISA card** (`Y4A013000` "PCCOM"): a **4 KB dual-port RAM window at
-CC000–CFFFF** (default CC000–CCFFF, jumpers ST1–ST3, selectable IRQ). The
+ISA card** (`Y4A013000`; "PCCOM" is the later AC95 card, docs/31 §4): a
+**2 KB dual-port RAM window**, one of eight in CC000–CFFFF (default
+CC000–CC7FF, jumpers ST1–ST3, selectable IRQ; manual p.45). The
 card's own hardware serialised that shared RAM onto the RS-485 bus
 (control-box connector `X300`). See
 [`../../docs/_machine-facts.md`](../../docs/_machine-facts.md).
@@ -68,7 +69,8 @@ Concrete steps, in order of increasing fidelity:
 
 1. **QEMU with a custom ISA device** (most scriptable). Write a small
    device model (C, ~150 lines) registering a `MemoryRegion` with
-   read/write callbacks over 0xCC000–0xCCFFF backed by a 4 KB buffer, and
+   read/write callbacks over 0xCC000–0xCC7FF (the default jumper setting)
+   backed by a 2 KB buffer, and
    log every access with an instruction-count or virtual-time stamp.
    Build against QEMU's source tree (`hw/isa/`), boot FreeDOS or MS-DOS
    6.22 with `-M isapc`, run `FANOT`. QEMU's `-d`/tracing infrastructure

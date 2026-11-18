@@ -1,0 +1,28 @@
+[package]
+name = "emco-kd240"
+version = "0.1.0"
+edition = "2021"
+description = "Linux service for the AMD Kria KD240: the sender core against its virtual machine behind a web UI over Ethernet, and a listen-only RS-485 capture in the bridge's record format. No code path transmits on the machine bus."
+license = "MIT"
+
+# Runs on the KD240's Cortex-A53 under Kria Ubuntu (aarch64-unknown-linux-gnu)
+# and on any Linux laptop. The core logic is the sender's (`sender/core`) and
+# the capture record format is the bridge's (`firmware/bridge-core`); this
+# crate is the shell around them. The UI (`ui/`, plain ES modules and the
+# vendored RxJS bundle) is embedded in the binary.
+[dependencies]
+emco-sender-core = { path = "../sender/core" }
+emco-bridge-core = { path = "../firmware/bridge-core" }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Safe termios for the read-only capture tty (no `unsafe` in this crate).
+rustix = { version = "1", default-features = false, features = ["std", "termios", "fs"] }
+
+[dev-dependencies]
+# A pseudo-terminal stands in for the RS-485 tty in the capture test.
+rustix = { version = "1", default-features = false, features = ["std", "termios", "fs", "pty"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

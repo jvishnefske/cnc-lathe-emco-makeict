@@ -52,10 +52,20 @@ pub struct Bounds {
 
 impl Bounds {
     pub fn empty() -> Bounds {
-        Bounds { x_min: 0.0, x_max: 0.0, z_min: 0.0, z_max: 0.0 }
+        Bounds {
+            x_min: 0.0,
+            x_max: 0.0,
+            z_min: 0.0,
+            z_max: 0.0,
+        }
     }
     fn from_point(x: f64, z: f64) -> Bounds {
-        Bounds { x_min: x, x_max: x, z_min: z, z_max: z }
+        Bounds {
+            x_min: x,
+            x_max: x,
+            z_min: z,
+            z_max: z,
+        }
     }
     fn include(&mut self, x: f64, z: f64) {
         self.x_min = self.x_min.min(x);
@@ -116,9 +126,13 @@ fn segment_from_motion(mv: &MotionCmd, line: u32, tool: u32) -> Segment {
         MoveKind::Rapid => (SegKind::Rapid, None, None, None, None),
         MoveKind::Feed => (SegKind::Feed, None, None, None, Some(mv.feed_mm_min)),
         MoveKind::Thread => (SegKind::Thread, None, None, None, Some(mv.feed_mm_min)),
-        MoveKind::Arc { cx, cz, ccw } => {
-            (SegKind::Arc, Some(cx), Some(cz), Some(ccw), Some(mv.feed_mm_min))
-        }
+        MoveKind::Arc { cx, cz, ccw } => (
+            SegKind::Arc,
+            Some(cx),
+            Some(cz),
+            Some(ccw),
+            Some(mv.feed_mm_min),
+        ),
     };
     Segment {
         kind,
@@ -153,10 +167,10 @@ pub fn segment_bounds(seg: &Segment) -> Bounds {
     for (i, ang) in [0.0, FRAC_PI_2, PI, -FRAC_PI_2].iter().enumerate() {
         if angle_on_arc(a0, a1, *ang, ccw) {
             match i {
-                0 => b.include(cx, cz + r),  // +z extreme
-                1 => b.include(cx + r, cz),  // +x extreme
-                2 => b.include(cx, cz - r),  // -z extreme
-                _ => b.include(cx - r, cz),  // -x extreme
+                0 => b.include(cx, cz + r), // +z extreme
+                1 => b.include(cx + r, cz), // +x extreme
+                2 => b.include(cx, cz - r), // -z extreme
+                _ => b.include(cx - r, cz), // -x extreme
             }
         }
     }
@@ -226,7 +240,10 @@ pub fn backplot(program: &crate::gcode::Program, stock: Option<StockSpec>) -> Ba
         bounds.include(0.0, s.z_face_mm - s.length_mm);
         bounds.include(s.diameter_mm / 2.0, s.z_face_mm);
     }
-    Backplot { segments: program.segments.clone(), bounds }
+    Backplot {
+        segments: program.segments.clone(),
+        bounds,
+    }
 }
 
 #[cfg(test)]
@@ -260,7 +277,11 @@ mod tests {
     fn arc_ik_form_geometry() {
         // Quarter arc: start (x=0,z=0), end (x=10,z=-10), centre at (x=0,z=-10).
         let p = parse("G8 G94 F100\nG0 X0 Z0\nG3 X10 Z-10 I0 K-10");
-        let arcs: Vec<_> = p.segments.iter().filter(|s| s.kind == SegKind::Arc).collect();
+        let arcs: Vec<_> = p
+            .segments
+            .iter()
+            .filter(|s| s.kind == SegKind::Arc)
+            .collect();
         assert_eq!(arcs.len(), 1);
         let a = arcs[0];
         assert!((a.cx.unwrap() - 0.0).abs() < 1e-9);
@@ -274,7 +295,12 @@ mod tests {
         let p_r = parse("G8 G94 F100\nG0 X0 Z0\nG3 X10 Z-10 R10");
         let a = &p_ik.segments[1];
         let b = &p_r.segments[1];
-        assert!((a.cx.unwrap() - b.cx.unwrap()).abs() < 1e-6, "{:?} vs {:?}", a.cx, b.cx);
+        assert!(
+            (a.cx.unwrap() - b.cx.unwrap()).abs() < 1e-6,
+            "{:?} vs {:?}",
+            a.cx,
+            b.cx
+        );
         assert!((a.cz.unwrap() - b.cz.unwrap()).abs() < 1e-6);
     }
 
@@ -301,7 +327,11 @@ mod tests {
         // The +x extreme of that arc is x=10 at z=-10 even though both
         // endpoints have x=0.
         let p = parse("G8 G94 F100\nG0 X0 Z0\nG3 X0 Z-20 I0 K-10");
-        assert!((p.bounds.x_max - 10.0).abs() < 1e-9, "bounds {:?}", p.bounds);
+        assert!(
+            (p.bounds.x_max - 10.0).abs() < 1e-9,
+            "bounds {:?}",
+            p.bounds
+        );
         assert!((p.bounds.x_min - 0.0).abs() < 1e-9);
         assert!((p.bounds.z_min + 20.0).abs() < 1e-9);
     }
@@ -320,7 +350,11 @@ mod tests {
     #[test]
     fn thread_g33_emits_thread_segment() {
         let p = parse("G8\nG0 X5 Z2\nG33 Z-20 F1.5");
-        let t: Vec<_> = p.segments.iter().filter(|s| s.kind == SegKind::Thread).collect();
+        let t: Vec<_> = p
+            .segments
+            .iter()
+            .filter(|s| s.kind == SegKind::Thread)
+            .collect();
         assert_eq!(t.len(), 1);
         assert_eq!(t[0].z1, -20.0);
     }
@@ -329,7 +363,10 @@ mod tests {
     fn g76_simplified_to_thread_with_warning() {
         let p = parse("G8\nG0 X8 Z2\nG76 X7.0 Z-15 F1.0");
         assert!(p.segments.iter().any(|s| s.kind == SegKind::Thread));
-        assert!(p.diagnostics.iter().any(|d| d.message.contains("single thread pass")));
+        assert!(p
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("single thread pass")));
     }
 
     #[test]
@@ -349,7 +386,11 @@ mod tests {
         let p = parse("G8 G0 X5 Z-10");
         let bp = backplot(
             &p,
-            Some(StockSpec { diameter_mm: 40.0, length_mm: 60.0, z_face_mm: 0.0 }),
+            Some(StockSpec {
+                diameter_mm: 40.0,
+                length_mm: 60.0,
+                z_face_mm: 0.0,
+            }),
         );
         assert!((bp.bounds.x_max - 20.0).abs() < 1e-9);
         assert!((bp.bounds.z_min + 60.0).abs() < 1e-9);
@@ -369,7 +410,11 @@ mod tests {
 
     #[test]
     fn point_along_arc_stays_on_radius() {
-        let kind = MoveKind::Arc { cx: 0.0, cz: -10.0, ccw: true };
+        let kind = MoveKind::Arc {
+            cx: 0.0,
+            cz: -10.0,
+            ccw: true,
+        };
         for i in 0..=10 {
             let t = i as f64 / 10.0;
             let (x, z) = point_along(kind, 0.0, 0.0, 10.0, -10.0, t);
@@ -383,7 +428,11 @@ mod tests {
 
     #[test]
     fn arc_length_quarter_circle() {
-        let kind = MoveKind::Arc { cx: 0.0, cz: -10.0, ccw: true };
+        let kind = MoveKind::Arc {
+            cx: 0.0,
+            cz: -10.0,
+            ccw: true,
+        };
         let len = segment_length(kind, 0.0, 0.0, 10.0, -10.0);
         assert!((len - std::f64::consts::FRAC_PI_2 * 10.0).abs() < 1e-9);
     }

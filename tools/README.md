@@ -3,9 +3,12 @@
 The EMCO PC Turn 50's control box talks to its (long-gone) DOS PC over
 **RS-485** — the rear DB9 is bulkhead connector **`X300`**: pin 2 GND,
 pin 3 DATA−, pin 8 DATA+, a 3-wire half-duplex multidrop bus. The PC side
-was a proprietary **memory-mapped ISA card** (`Y4A013000`, a 4 KB
-dual-port RAM window at CC000–CFFFF), **not a UART**, so the wire protocol
-is unknown and is not a text byte stream. See
+was a proprietary **memory-mapped ISA card** (`Y4A013000`, a 2 KB
+dual-port RAM window, default CC000–CC7FF), so the PC software never
+touched a UART. The wire protocol is unknown and is not a text byte
+stream; it is probably asynchronous framing at an unknown rate, perhaps
+9-bit (doc 31). The message layer above it is known in outline from
+WinNC's own log (`winnc-485-log.py` below). See
 [`../docs/_machine-facts.md`](../docs/_machine-facts.md) and
 [`../docs/30-serial-protocol.md`](../docs/30-serial-protocol.md).
 
@@ -183,6 +186,20 @@ implementations of a wire format drift silently. So
 asserts its bytes have not changed, and these cases assert the Python decoder
 reproduces exactly the records the scenario describes. Neither side can move
 without the other going red.
+
+### `winnc-485-log.py` — WinNC's own RS-485 message log
+
+```sh
+python3 tools/winnc-485-log.py 485tr-1.txt          # code table, Markdown
+python3 tools/winnc-485-log.py 485tr-1.txt --dump   # one line per message
+python3 -B tools/test_winnc_485_log.py              # its tests
+```
+
+Reads the "Aufzeichnung der RS485 Schnittstelle" text that WinNC writes when
+its logger is on: direction, sequence number, time, length, destination,
+source, code and payload per message. The one public recording (a PC Mill 50)
+and what it shows are in [`../docs/31-rs485-message-layer.md`](../docs/31-rs485-message-layer.md).
+A text reader only; it opens no port.
 
 ### `image-size.py` — what would actually be flashed
 

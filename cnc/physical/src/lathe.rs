@@ -181,6 +181,8 @@ pub struct Lathe {
     /// machine µm = raw µm + offset, once referenced.
     offset: [Option<i64>; 2],
     spindle_cmd: i32,
+    /// The phase whose command set the spindle turning.
+    spindle_owner: Option<usize>,
     spindle: Option<i32>,
     station: u8,
     ready: Option<bool>,
@@ -209,6 +211,7 @@ impl Lathe {
             home: [None; 2],
             offset: [None; 2],
             spindle_cmd: 0,
+            spindle_owner: None,
             spindle: None,
             station: 1,
             ready: None,
@@ -355,12 +358,10 @@ impl Lathe {
                 if moving {
                     self.flush(out);
                 }
-                // Likewise only a spindle phase that was acting stops the
-                // spindle; one refused at its start leaves it as it is.
-                if matches!(i, SPIN | SPIN_STOP)
-                    && self.phases[i].step != Step::None
-                    && self.spindle_cmd != 0
-                {
+                // The phase that set the spindle turning stops it, whatever
+                // state it is leaving (Running, Holding, Held, Restarting);
+                // one refused at its start never owned it and leaves it.
+                if self.spindle_owner == Some(i) && self.spindle_cmd != 0 {
                     self.command_spindle(0, out);
                 }
                 self.phases[i].step = Step::None;
@@ -368,6 +369,11 @@ impl Lathe {
             }
             PhaseState::Resetting => {
                 self.phases[i].abort = None;
+                // A completed spindle.run leaves the spindle turning, owned
+                // by no phase: spindle.stop or the e-stop stops it.
+                if self.spindle_owner == Some(i) {
+                    self.spindle_owner = None;
+                }
                 self.done(i, out);
             }
             _ => {}
@@ -375,6 +381,9 @@ impl Lathe {
     }
 
     fn command_spindle(&mut self, rpm: i32, out: &mut Outs) {
+        if rpm == 0 {
+            self.spindle_owner = None;
+        }
         self.spindle_cmd = rpm;
         out.push(Out::Spindle(rpm));
     }
@@ -430,6 +439,9 @@ impl Lathe {
             SPIN => {
                 let [rpm, ..] = self.phases[i].args();
                 self.command_spindle(rpm, out);
+                if rpm != 0 {
+                    self.spindle_owner = Some(SPIN);
+                }
                 self.phases[i].step = Step::Spin;
                 self.check_spin(i, out);
             }

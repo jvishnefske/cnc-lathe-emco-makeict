@@ -342,3 +342,17 @@ fn the_spindle_does_not_change_under_a_running_program() {
     r.run_ms(500);
     assert_eq!(r.sim.spindle_rpm(), 300);
 }
+
+#[test]
+fn stopping_a_held_spindle_phase_stops_the_spindle() {
+    let mut r = Rig::pc_turn_50();
+    r.command(SPIN, Command::Start, &[600]);
+    r.run_ms(100);
+    assert_eq!(r.lathe.phase(SPIN), PhaseState::Running);
+    r.command(SPIN, Command::Hold, &[]);
+    assert_eq!(r.lathe.phase(SPIN), PhaseState::Held);
+    r.command(SPIN, Command::Stop, &[]);
+    assert_eq!(r.lathe.phase(SPIN), PhaseState::Stopped);
+    r.run_ms(1_000);
+    assert_eq!(r.sim.spindle_rpm(), 0);
+}

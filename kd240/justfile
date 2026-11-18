@@ -52,3 +52,13 @@ build-only target=host:
 # The service's bearer token (made on the board at first start).
 token target=host:
     ssh {{target}} sudo cat /var/lib/emco-kd240/token
+
+# Build with the middleware checkout as it is on disk (../middleware: its
+# tracked files, uncommitted changes included; not its target/) instead of
+# the commit flake.lock pins, e.g. `just dev-middleware build ..#emco-fleet`.
+dev-middleware *args:
+    nix {{args}} --override-input middleware git+file://$(realpath ../../middleware)
+
+# Move the flake's middleware pin to that checkout's branch head.
+bump-middleware:
+    cd .. && nix flake update middleware

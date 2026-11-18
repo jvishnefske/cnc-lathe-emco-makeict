@@ -1,5 +1,20 @@
 {
   "nodes": {
+    "crane": {
+      "locked": {
+        "lastModified": 1792350552,
+        "narHash": "sha256-292lvpvxTGKryKxh3/3tcIVi85CwYGdl4oOi113Sob8=",
+        "owner": "ipetkov",
+        "repo": "crane",
+        "rev": "e675a36b7377bebe41d548388a2501cbb16d380d",
+        "type": "github"
+      },
+      "original": {
+        "owner": "ipetkov",
+        "repo": "crane",
+        "type": "github"
+      }
+    },
     "flake-utils": {
       "inputs": {
         "systems": "systems"
@@ -16,6 +31,31 @@
         "owner": "numtide",
         "repo": "flake-utils",
         "type": "github"
+      }
+    },
+    "middleware": {
+      "inputs": {
+        "crane": "crane",
+        "nixpkgs": [
+          "nixpkgs"
+        ],
+        "rust-overlay": [
+          "rust-overlay"
+        ]
+      },
+      "locked": {
+        "lastModified": 1794982455,
+        "narHash": "sha256-Jy5KZMH74XvJZoIEDibFG3uJSdWYrmWMwcrdCwQT2XM=",
+        "ref": "refs/heads/stack/signed-updates",
+        "rev": "455c983ce62da9608ce23c5fe1cd4d8330753cf9",
+        "revCount": 190,
+        "type": "git",
+        "url": "file:///home/j/src/middleware"
+      },
+      "original": {
+        "ref": "refs/heads/stack/signed-updates",
+        "type": "git",
+        "url": "file:///home/j/src/middleware"
       }
     },
     "nixpkgs": {
@@ -53,6 +93,7 @@
     "root": {
       "inputs": {
         "flake-utils": "flake-utils",
+        "middleware": "middleware",
         "nixpkgs": "nixpkgs",
         "nixpkgs-linuxcnc": "nixpkgs-linuxcnc",
         "rust-overlay": "rust-overlay"

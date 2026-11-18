@@ -12,9 +12,26 @@
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # The middleware the KD240 runs on (github.com/jvishnefske/middleware):
+    # pub/sub, req/resp and kv, signed payloads and their trust, the S88
+    # recipe core, and the POSIX node that hosts payloads. Pinned to a
+    # commit by flake.lock.
+    #
+    # INTERIM: stack/signed-updates is not on GitHub yet, so this is the
+    # sibling checkout's branch, read through git (tracked files only, at
+    # the locked commit). Once it is pushed this becomes
+    #   url = "github:jvishnefske/middleware/<rev>";
+    # and the local checkout is reached with
+    #   nix build … --override-input middleware git+file://$PWD/../middleware
+    # (`just dev-middleware` in kd240/justfile).
+    middleware = {
+      url = "git+file:///home/j/src/middleware?ref=refs/heads/stack/signed-updates";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.rust-overlay.follows = "rust-overlay";
+    };
   };
 
-  outputs = { self, nixpkgs, nixpkgs-linuxcnc, flake-utils, rust-overlay }:
+  outputs = { self, nixpkgs, nixpkgs-linuxcnc, flake-utils, rust-overlay, middleware }:
     {
       # The Kria KD240's SD card and its over-the-network updates
       # (kd240/nix/configuration.nix). On the stable release, like LinuxCNC:

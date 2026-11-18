@@ -325,10 +325,14 @@ impl Lathe {
     /// Runs the logic the phase's new state starts.
     fn enter(&mut self, i: usize, out: &mut Outs) {
         let state = self.phases[i].state;
+        // Only a motion phase with motion of its own under way empties the
+        // queue: one refused at its start never sent any, and the queue
+        // may hold another phase's.
+        let moving = matches!(i, REFERENCE | MOVE | RUN) && self.phases[i].step != Step::None;
         match state {
             PhaseState::Running => self.start(i, out),
             PhaseState::Holding => {
-                if matches!(i, REFERENCE | MOVE | RUN) {
+                if moving {
                     self.flush(out);
                 }
                 self.done(i, out);
@@ -348,7 +352,7 @@ impl Lathe {
                 }
             }
             PhaseState::Stopping | PhaseState::Aborting => {
-                if matches!(i, REFERENCE | MOVE | RUN) {
+                if moving {
                     self.flush(out);
                 }
                 if matches!(i, SPIN | SPIN_STOP) && self.spindle_cmd != 0 {
@@ -370,10 +374,23 @@ impl Lathe {
         out.push(Out::Spindle(rpm));
     }
 
+    /// Whether a phase other than `i` that moves the axes or the turret
+    /// is still doing something (not Idle and not in a final state).
+    fn other_mover_active(&self, i: usize) -> bool {
+        [REFERENCE, MOVE, RUN, INDEX].iter().any(|&j| {
+            let s = self.phases[j].state;
+            j != i && s != PhaseState::Idle && !s.is_final()
+        })
+    }
+
     /// Running's logic.
     fn start(&mut self, i: usize, out: &mut Outs) {
         if self.estop != Some(true) {
             return self.abort(i, Abort::EStop, out);
+        }
+        // One thing moves the axes or the turret at a time.
+        if matches!(i, REFERENCE | MOVE | RUN | INDEX) && self.other_mover_active(i) {
+            return self.abort(i, Abort::MotionBusy, out);
         }
         match i {
             REFERENCE => {
@@ -560,7 +577,9 @@ impl Lathe {
                 if !closed && was != Some(false) {
                     // The position is no longer trusted (doc 40 §5).
                     self.offset = [None; 2];
-                    self.spindle_cmd = 0;
+                    // Told to the driver, not only remembered: a driver
+                    // must not depend on its own e-stop handling.
+                    self.command_spindle(0, &mut out);
                     for i in 0..PHASES.len() {
                         self.abort(i, Abort::EStop, &mut out);
                     }
@@ -635,11 +654,25 @@ impl Lathe {
         if batch.len() > free {
             return false;
         }
-        let max_feed = self.lim.max_feed_um_s;
+        let max_feed = u64::from(self.lim.max_feed_um_s);
+        // A synchronised move's speed is its feed per revolution times the
+        // spindle's speed: checked at the faster of the commanded and the
+        // measured speed, which must also be within the threading limit.
+        let rpm = u64::from(
+            self.spindle_cmd
+                .unsigned_abs()
+                .max(self.spindle.unwrap_or(0).unsigned_abs()),
+        );
+        let threading_ok = rpm > 0 && rpm <= u64::from(self.lim.threading_max_rpm.unsigned_abs());
         let ok = batch.segments().all(|s| {
-            self.lim.contains(s.x_um, s.z_um)
-                && (s.flags & (Segment::RAPID | Segment::SYNC) != 0 || s.feed <= max_feed)
-                && s.flags & Segment::FLUSH == 0
+            let feed_ok = if s.flags & Segment::RAPID != 0 {
+                true
+            } else if s.flags & Segment::SYNC != 0 {
+                threading_ok && u64::from(s.feed) * rpm / 60 <= max_feed
+            } else {
+                u64::from(s.feed) <= max_feed
+            };
+            self.lim.contains(s.x_um, s.z_um) && feed_ok && s.flags & Segment::FLUSH == 0
         });
         if !ok {
             return false;

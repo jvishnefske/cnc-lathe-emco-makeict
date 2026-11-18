@@ -32,6 +32,18 @@ The lathe split the ISA-88 way, as WASM payloads that run on
 steps: motion leaves it as whole segments, and a driver runs them in its
 own time base. The KD240 driver has no outputs at all.
 
+**Not yet authenticated: who may command a unit.** The physical model
+takes phase commands and segments from any node that can publish on its
+keys; a payload is not told who sent a publication. Before a driver with
+outputs exists, commands must come only from the process model it is
+assigned: the runtime can already do this for a channel bound as a
+`Remote` target (only that node's messages are delivered), which needs
+the command keys declared as channels (more than the 16 a payload has), or
+an ABI change that hands `on_message` the sender. What the physical model
+does check: limits and travel, the threading limit and feed of a
+synchronised move, one motion phase at a time, the e-stop (which stops the
+spindle explicitly), and a reference before any move.
+
 | | |
 |---|---|
 | `model/` (`cnc-model`) | `PhysicalConfig` (the physical half of the sender's `MachineProfile`, which embeds it, plus the reference and the I/O map), the integer `Limits`, the control-module traits, the wire (keys, `CmState`, segment batches). `fixtures/pc_turn_50.json` is the PC Turn 50, written by its test and checked by the browser sender's |
@@ -47,7 +59,9 @@ as recipe-core allows.
 ```sh
 cd cnc
 cargo test                     # all of it; hil builds the payloads first (a few minutes the first time)
-cargo build --release --target wasm32-unknown-unknown -p cnc-physical -p cnc-process
+cargo build --release --target wasm32-unknown-unknown -p cnc-physical
+cargo build --release --target wasm32-unknown-unknown -p cnc-process  # separately: the physical
+                               # payload uses the SDK's panic handler, the process one std's
 CNC_WRITE_FIXTURES=1 cargo test -p cnc-model   # after changing pc_turn_50()
 ```
 

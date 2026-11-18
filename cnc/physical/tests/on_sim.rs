@@ -242,3 +242,82 @@ fn a_repeated_command_is_applied_once() {
     );
     assert_eq!(r.lathe.phase(SPIN), PhaseState::Complete);
 }
+
+#[test]
+fn the_estop_tells_the_driver_to_stop_the_spindle() {
+    let mut r = Rig::pc_turn_50();
+    r.command(SPIN, Command::Start, &[800]);
+    r.until(SPIN, PhaseState::Complete, 3_000);
+    let outs = r.lathe.input(Input::EStop(false));
+    assert!(
+        outs.iter().any(|o| o == Out::Spindle(0)),
+        "an explicit 0 to the driver"
+    );
+}
+
+#[test]
+fn one_motion_phase_at_a_time() {
+    let mut r = Rig::pc_turn_50();
+    r.command(REFERENCE, Command::Start, &[]);
+    r.run_ms(100);
+    assert_eq!(r.lathe.phase(REFERENCE), PhaseState::Running);
+    // A move or an index while referencing: refused, the reference goes on.
+    r.command(MOVE, Command::Start, &[10_000, -10_000, 1000]);
+    assert_eq!(r.lathe.phase(MOVE), PhaseState::Aborted);
+    assert_eq!(r.lathe.report(MOVE).2[0], Abort::MotionBusy as i32);
+    r.command(INDEX, Command::Start, &[2]);
+    assert_eq!(r.lathe.phase(INDEX), PhaseState::Aborted);
+    assert_eq!(r.lathe.phase(REFERENCE), PhaseState::Running);
+    r.until(REFERENCE, PhaseState::Complete, 60_000);
+}
+
+#[test]
+fn synchronised_segments_obey_the_feed_and_threading_limits() {
+    use cnc_model::wire::encode_segments;
+    use cnc_physical::lathe::RUN;
+    use middleware::wasm_abi::machine::Segment;
+    let mut r = Rig::pc_turn_50();
+    r.command(REFERENCE, Command::Start, &[]);
+    r.until(REFERENCE, PhaseState::Complete, 60_000);
+    let thread = |seq, feed| Segment {
+        seq,
+        x_um: 10_000,
+        z_um: -60_000,
+        feed,
+        flags: Segment::SYNC,
+    };
+    // Above the 400 rpm threading limit: refused, the run aborts.
+    r.command(SPIN, Command::Start, &[1000]);
+    r.until(SPIN, PhaseState::Complete, 3_000);
+    r.command(RUN, Command::Start, &[]);
+    let outs = r
+        .lathe
+        .segments(&encode_segments(&[thread(1, 1500)], true).unwrap());
+    r.apply(outs);
+    assert_eq!(r.lathe.phase(RUN), PhaseState::Aborted);
+    assert_eq!(r.lathe.report(RUN).2[0], Abort::BadSegments as i32);
+    // At 300 rpm: 1.5 mm/rev is 7.5 mm/s, under 12.5; 3 mm/rev is 15, over.
+    r.command(RUN, Command::Reset, &[]);
+    r.command(SPIN, Command::Reset, &[]);
+    r.run_ms(1);
+    r.command(SPIN, Command::Start, &[300]);
+    r.until(SPIN, PhaseState::Complete, 3_000);
+    r.command(RUN, Command::Start, &[]);
+    let outs = r
+        .lathe
+        .segments(&encode_segments(&[thread(2, 3000)], true).unwrap());
+    r.apply(outs);
+    assert_eq!(
+        r.lathe.phase(RUN),
+        PhaseState::Aborted,
+        "15 mm/s is over the 12.5 mm/s maximum"
+    );
+    r.command(RUN, Command::Reset, &[]);
+    r.run_ms(1);
+    r.command(RUN, Command::Start, &[]);
+    let outs = r
+        .lathe
+        .segments(&encode_segments(&[thread(3, 1500)], true).unwrap());
+    r.apply(outs);
+    r.until(RUN, PhaseState::Complete, 20_000);
+}

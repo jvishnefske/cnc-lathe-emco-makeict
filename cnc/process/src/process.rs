@@ -26,6 +26,11 @@ use recipe_core::wire::{decode_report, encode_command, Report};
 
 use crate::compile::{compile, Op};
 
+/// Most programs held at once.
+pub const MAX_PROGRAMS: usize = 16;
+/// Most bytes of program text held, all programs together.
+pub const PROGRAM_BYTES: usize = 256 * 1024;
+
 const REFERENCE: usize = 0;
 const RUN: usize = 2;
 const SPIN: usize = 3;
@@ -311,11 +316,22 @@ impl Process {
         };
         let id = u32::from_le_bytes([head[0], head[1], head[2], head[3]]);
         let offset = u32::from_le_bytes([head[4], head[5], head[6], head[7]]) as usize;
+        if !self.programs.contains_key(&id) && self.programs.len() >= MAX_PROGRAMS {
+            return;
+        }
+        // The budget is for all programs together, this one's old text
+        // excluded when it is being replaced.
+        let others: usize = self
+            .programs
+            .iter()
+            .filter(|(k, _)| **k != id)
+            .map(|(_, t)| t.len())
+            .sum();
         let text = self.programs.entry(id).or_default();
         if offset == 0 {
             text.clear();
         }
-        if offset == text.len() && text.len() + data.len() <= 128 * 1024 {
+        if offset == text.len() && others + text.len() + data.len() <= PROGRAM_BYTES {
             text.extend_from_slice(data);
         }
     }
@@ -362,16 +378,19 @@ impl Process {
         else {
             return self.fail("no such program");
         };
-        // The screen's preflight, with this machine's belts and limits.
-        if let (Some(b), Some(machine)) = (emco_rules::Belt::new(belt), rules_machine(&info)) {
-            if let Some(f) = emco_rules::preflight(&text, b, &machine)
-                .into_iter()
-                .find(|f| f.severity == emco_rules::Severity::Error)
-            {
-                return self.fail(&format!("preflight, line {}: {}", f.line, f.message));
-            }
-        } else if info.belts > 0 {
-            return self.fail("no such belt");
+        // The screen's preflight, with this machine's belts and limits. It
+        // fails closed: a run it cannot check does not run.
+        let Some(b) = emco_rules::Belt::new(belt) else {
+            return self.fail("no such belt (1, 2 or 3)");
+        };
+        let Some(machine) = rules_machine(&info) else {
+            return self.fail("the preflight knows machines with three belt positions only");
+        };
+        if let Some(f) = emco_rules::preflight(&text, b, &machine)
+            .into_iter()
+            .find(|f| f.severity == emco_rules::Severity::Error)
+        {
+            return self.fail(&format!("preflight, line {}: {}", f.line, f.message));
         }
         match compile(&text, &info, self.g54.0, self.g54.1) {
             Ok(c) => {
@@ -640,6 +659,33 @@ mod tests {
             p.publication(&own_key([9; 8], "program"), &c);
         }
         assert_eq!(p.programs.get(&4).map(Vec::len), Some(text.len()));
+    }
+
+    #[test]
+    fn the_program_store_has_a_budget() {
+        let mut p = Process::new([9; 8], (0.0, -50.0));
+        let key = own_key([9; 8], "program");
+        let big = "G0 X10 Z0\n".repeat(PROGRAM_BYTES / 10 / 2);
+        for id in 0..3 {
+            for c in program_chunks(id, &big) {
+                p.publication(&key, &c);
+            }
+        }
+        let total: usize = p.programs.values().map(Vec::len).sum();
+        assert!(total <= PROGRAM_BYTES, "{total}");
+        assert_eq!(p.programs[&0].len(), big.len());
+        assert!(p.programs[&2].len() < big.len(), "the third did not fit");
+        // Replacing one does not count its old text.
+        for c in program_chunks(0, &big) {
+            p.publication(&key, &c);
+        }
+        assert_eq!(p.programs[&0].len(), big.len());
+        // And there are only so many ids.
+        let mut q = Process::new([9; 8], (0.0, -50.0));
+        for id in 0..(MAX_PROGRAMS as u32 + 4) {
+            q.publication(&key, &program_chunks(id, "M30\n")[0]);
+        }
+        assert_eq!(q.programs.len(), MAX_PROGRAMS);
     }
 
     #[test]

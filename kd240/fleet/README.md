@@ -131,10 +131,9 @@ them end to end against a fake card that also plays U-Boot's part.
 | `../nix/fleet.nix` | `services.emco-fleet-agent`, the NixOS module for the board (off by default) |
 | `../nix/ab.nix` | the A/B card: layout, `boot.scr`, the slot's squashfs store, the bundle and the card image |
 
-The workspace depends on `../../../middleware-posix-node` (the sibling
-middleware worktree, branch `stack/posix-node`) by path, while that branch
-is unpublished; the flake reaches the same branch through its `middleware`
-input.
+The workspace takes middleware as git dependencies pinned to a commit
+(github.com/jvishnefske/middleware, stack/posix-node); the flake pins the
+same commit.
 
 ```sh
 cd kd240/fleet

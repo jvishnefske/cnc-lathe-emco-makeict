@@ -13,6 +13,6 @@ cnc-model = { workspace = true, features = ["alloc"] }
 recipe-core.workspace = true
 # std on wasm32: the sender's interpreter and the screen's rules are std
 # crates; std brings the allocator. So no SDK panic handler (std has one).
-mw-payload = { path = "../../../middleware-posix-node/payloads/sdk", default-features = false }
+mw-payload.workspace = true
 emco-sender-core = { path = "../../sender/core", default-features = false }
 emco-rules = { path = "../../kd240/web/rules" }

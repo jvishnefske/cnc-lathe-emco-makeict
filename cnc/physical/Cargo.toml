@@ -13,7 +13,8 @@ crate-type = ["cdylib", "rlib"]
 cnc-model.workspace = true
 middleware.workspace = true
 recipe-core.workspace = true
-mw-payload.workspace = true
+# The SDK's panic handler: this payload is no_std.
+mw-payload = { workspace = true, features = ["panic-handler"] }
 
 [build-dependencies]
 cnc-model = { workspace = true, features = ["alloc"] }
@@ -21,5 +22,5 @@ serde_json.workspace = true
 
 [dev-dependencies]
 # mw-posix-node's simulator, to run the model against a machine on the host.
-mw-posix-node = { path = "../../../middleware-posix-node/posix-node" }
+mw-posix-node.workspace = true
 cnc-model = { workspace = true, features = ["alloc"] }

@@ -6,8 +6,7 @@
 # It holds the server binary and nothing else (no shell). It runs as
 # 65532:65532, like the Dockerfile's distroless image, so the compose file's
 # volumes work with either.
-{ lib, dockerTools, callPackage, middlewareSrc
-, server ? callPackage ./package.nix { inherit middlewareSrc; members = [ "emco-fleet-server" ]; } }:
+{ lib, dockerTools, callPackage, server ? callPackage ./package.nix { members = [ "emco-fleet-server" ]; } }:
 
 dockerTools.buildLayeredImage {
   name = "emco-fleet-server";

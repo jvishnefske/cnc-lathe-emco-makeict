@@ -20,6 +20,10 @@ let
       ../ui
       ../../sender/core/Cargo.toml
       ../../sender/core/src
+      ../../cnc/Cargo.toml
+      ../../cnc/model/Cargo.toml
+      ../../cnc/model/src
+      ../../cnc/model/fixtures
       ../../firmware/bridge-core/Cargo.toml
       ../../firmware/bridge-core/src
       ../../tools/emco-capture.py
@@ -32,7 +36,12 @@ rustPlatform.buildRustPackage {
   inherit src;
   cargoRoot = "kd240";
   buildAndTestSubdir = "kd240";
-  cargoLock.lockFile = ../Cargo.lock;
+  cargoLock = {
+    lockFile = ../Cargo.lock;
+    # middleware (cnc/model's machine messages, recipe-core), a git
+    # dependency pinned to a commit: one checkout for every crate in it.
+    outputHashes."middleware-0.5.0" = "sha256-Li7lffgoOKJ47wb0kbDjBlz7u44ZR/PoLij7oRXbMcE=";
+  };
 
   # The capture test runs the repository's decoder over a pty capture.
   nativeCheckInputs = [ python3 ];

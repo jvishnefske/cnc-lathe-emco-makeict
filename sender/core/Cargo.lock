@@ -109,6 +109,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "middleware"
 version = "0.5.0"
+source = "git+https://github.com/jvishnefske/middleware?rev=514f9747c114f70058361db13365f5efd806775e#514f9747c114f70058361db13365f5efd806775e"
 dependencies = [
  "heapless",
 ]
@@ -146,6 +147,7 @@ dependencies = [
 [[package]]
 name = "recipe-core"
 version = "0.1.0"
+source = "git+https://github.com/jvishnefske/middleware?rev=514f9747c114f70058361db13365f5efd806775e#514f9747c114f70058361db13365f5efd806775e"
 dependencies = [
  "state-table",
 ]
@@ -225,6 +227,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 [[package]]
 name = "state-table"
 version = "0.1.0"
+source = "git+https://github.com/jvishnefske/middleware?rev=514f9747c114f70058361db13365f5efd806775e#514f9747c114f70058361db13365f5efd806775e"
 
 [[package]]
 name = "syn"

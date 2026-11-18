@@ -72,8 +72,9 @@ with the fitted belt, hold, resume, stop, clear), programs in chunks on
 are held in memory for now; storing them in the node's kv needs a kv
 import the ABI does not have yet.
 
-The middleware is the sibling worktree `../middleware-posix-node` (branch
-`stack/posix-node`) by path, until it is published. A Linux node gives a
+Middleware comes as git dependencies pinned to a commit of
+github.com/jvishnefske/middleware (stack/posix-node); `cnc/Cargo.toml`
+shows how to build against a local checkout instead. A Linux node gives a
 payload 16 subscriptions and 20 M instructions per call (a process
 model's preflight and compile run in one), where a microcontroller gives 8
 and 1 M.

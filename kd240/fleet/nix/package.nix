@@ -9,15 +9,12 @@
 # The checks run the workspace's tests, the end-to-end one included (it
 # serves on 127.0.0.1, which the build sandbox has).
 #
-# `middlewareSrc`: the middleware checkout (the flake's `middleware` input).
-# The workspace reaches it by path, `../../../middleware-posix-node` from
-# kd240/fleet, so the source is laid out as `<root>/lathe/kd240/fleet`
-# beside `<root>/middleware-posix-node`. (When middleware becomes a cargo git dependency this
-# turns into cargoLock.outputHashes.)
-{ lib, rustPlatform, runCommand, middlewareSrc, members ? [ ] }:
+# The middleware crates are git dependencies pinned to a commit
+# (Cargo.lock), fetched with builtins.fetchGit.
+{ lib, rustPlatform, members ? [ ] }:
 
 let
-  fleet = lib.fileset.toSource {
+  src = lib.fileset.toSource {
     root = ../.;
     fileset = lib.fileset.unions [
       ../Cargo.toml
@@ -28,20 +25,19 @@ let
       ../cli
     ];
   };
-  src = runCommand "emco-fleet-src" { } ''
-    mkdir -p $out/lathe/kd240
-    cp -r ${fleet} $out/lathe/kd240/fleet
-    cp -r ${middlewareSrc} $out/middleware-posix-node
-    chmod -R u+w $out
-  '';
   pick = lib.concatMap (m: [ "-p" m ]) members;
 in
 rustPlatform.buildRustPackage {
   pname = if members == [ ] then "emco-fleet" else lib.concatStringsSep "+" members;
   version = "0.1.0";
   inherit src;
-  sourceRoot = "emco-fleet-src/lathe/kd240/fleet";
-  cargoLock.lockFile = ../Cargo.lock;
+  cargoLock = {
+    lockFile = ../Cargo.lock;
+    # The middleware git dependencies (one checkout of one commit).
+    outputHashes = {
+      "middleware-0.5.0" = "sha256-Li7lffgoOKJ47wb0kbDjBlz7u44ZR/PoLij7oRXbMcE=";
+    };
+  };
   cargoBuildFlags = pick;
   cargoTestFlags = pick;
 

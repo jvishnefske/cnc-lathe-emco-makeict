@@ -25,7 +25,7 @@
 #
 # It runs as root because it must write block devices; it sees the rest of
 # the system read-only, and only the SD card's block devices.
-{ config, lib, pkgs, middlewareSrc, ... }:
+{ config, lib, pkgs, ... }:
 
 let
   cfg = config.services.emco-fleet-agent;
@@ -38,8 +38,8 @@ in
 
     package = mkOption {
       type = types.package;
-      default = pkgs.callPackage ../fleet/nix/package.nix { inherit middlewareSrc; members = [ "emco-fleet-agent" ]; };
-      defaultText = lib.literalExpression ''pkgs.callPackage ../fleet/nix/package.nix { inherit middlewareSrc; members = [ "emco-fleet-agent" ]; }'';
+      default = pkgs.callPackage ../fleet/nix/package.nix { members = [ "emco-fleet-agent" ]; };
+      defaultText = lib.literalExpression ''pkgs.callPackage ../fleet/nix/package.nix { members = [ "emco-fleet-agent" ]; }'';
       description = "The emco-fleet-agent package.";
     };
 

@@ -24,11 +24,15 @@ version = "0.1.0"
 cnc-model = { path = "model", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 serde_json = "1"
-# middleware (stack/posix-node, the sibling worktree; a git dependency once
-# published): the ABI's machine messages, and recipe-core's S88 phases.
-middleware = { path = "../../middleware-posix-node", default-features = false }
-recipe-core = { path = "../../middleware-posix-node/recipe-core" }
-mw-payload = { path = "../../middleware-posix-node/payloads/sdk" }
+# middleware (github.com/jvishnefske/middleware, pinned to a commit of
+# stack/posix-node): the ABI's machine messages, recipe-core's S88 phases,
+# the payload SDK, mw-posix-node and mwctl for the host-in-the-loop tests.
+# Against a local checkout: cargo --config 'patch."https://github.com/jvishnefske/middleware".middleware.path="../../middleware"' …
+middleware = { git = "https://github.com/jvishnefske/middleware", rev = "514f9747c114f70058361db13365f5efd806775e", default-features = false }
+recipe-core = { git = "https://github.com/jvishnefske/middleware", rev = "514f9747c114f70058361db13365f5efd806775e" }
+mw-payload = { git = "https://github.com/jvishnefske/middleware", rev = "514f9747c114f70058361db13365f5efd806775e", default-features = false }
+mw-posix-node = { git = "https://github.com/jvishnefske/middleware", rev = "514f9747c114f70058361db13365f5efd806775e" }
+mwctl = { git = "https://github.com/jvishnefske/middleware", rev = "514f9747c114f70058361db13365f5efd806775e" }
 
 [profile.release]
 opt-level = "s"

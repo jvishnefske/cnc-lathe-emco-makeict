@@ -20,9 +20,7 @@ services:
   fleet:
     image: ${FLEET_IMAGE:-emco-fleet-server:latest}
     build:
-      # The parent of both checkouts (see ../Dockerfile).
-      context: ../../../..
-      dockerfile: cnc-lathe-emco-makeict/kd240/fleet/Dockerfile
+      context: ..
     restart: unless-stopped
     user: "65532:65532"
     read_only: true

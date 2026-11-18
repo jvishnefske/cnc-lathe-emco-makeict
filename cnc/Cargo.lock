@@ -251,6 +251,7 @@ dependencies = [
 [[package]]
 name = "board-pins"
 version = "0.1.0"
+source = "git+https://github.com/jvishnefske/middleware?rev=514f9747c114f70058361db13365f5efd806775e#514f9747c114f70058361db13365f5efd806775e"
 
 [[package]]
 name = "bs58"
@@ -842,6 +843,7 @@ dependencies = [
 [[package]]
 name = "esp-base"
 version = "0.6.0"
+source = "git+https://github.com/jvishnefske/middleware?rev=514f9747c114f70058361db13365f5efd806775e#514f9747c114f70058361db13365f5efd806775e"
 dependencies = [
  "board-pins",
  "embedded-storage",
@@ -1843,6 +1845,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "middleware"
 version = "0.5.0"
+source = "git+https://github.com/jvishnefske/middleware?rev=514f9747c114f70058361db13365f5efd806775e#514f9747c114f70058361db13365f5efd806775e"
 dependencies = [
  "bytes",
  "ed25519-dalek",
@@ -1894,6 +1897,7 @@ dependencies = [
 [[package]]
 name = "mw-gateway"
 version = "0.6.0"
+source = "git+https://github.com/jvishnefske/middleware?rev=514f9747c114f70058361db13365f5efd806775e#514f9747c114f70058361db13365f5efd806775e"
 dependencies = [
  "ed25519-dalek",
  "embedded-io-async",
@@ -1908,6 +1912,7 @@ dependencies = [
 [[package]]
 name = "mw-payload"
 version = "0.1.0"
+source = "git+https://github.com/jvishnefske/middleware?rev=514f9747c114f70058361db13365f5efd806775e#514f9747c114f70058361db13365f5efd806775e"
 dependencies = [
  "embedded-hal",
  "middleware",
@@ -1916,6 +1921,7 @@ dependencies = [
 [[package]]
 name = "mw-posix-node"
 version = "0.6.0"
+source = "git+https://github.com/jvishnefske/middleware?rev=514f9747c114f70058361db13365f5efd806775e#514f9747c114f70058361db13365f5efd806775e"
 dependencies = [
  "embedded-storage",
  "esp-base",
@@ -1932,6 +1938,7 @@ dependencies = [
 [[package]]
 name = "mw-service"
 version = "0.6.0"
+source = "git+https://github.com/jvishnefske/middleware?rev=514f9747c114f70058361db13365f5efd806775e#514f9747c114f70058361db13365f5efd806775e"
 dependencies = [
  "middleware",
  "opentelemetry",
@@ -1948,6 +1955,7 @@ dependencies = [
 [[package]]
 name = "mwctl"
 version = "0.1.0"
+source = "git+https://github.com/jvishnefske/middleware?rev=514f9747c114f70058361db13365f5efd806775e#514f9747c114f70058361db13365f5efd806775e"
 dependencies = [
  "cryptoki",
  "ed25519-dalek",
@@ -2716,6 +2724,7 @@ dependencies = [
 [[package]]
 name = "recipe-core"
 version = "0.1.0"
+source = "git+https://github.com/jvishnefske/middleware?rev=514f9747c114f70058361db13365f5efd806775e#514f9747c114f70058361db13365f5efd806775e"
 dependencies = [
  "state-table",
 ]
@@ -3423,6 +3432,7 @@ dependencies = [
 [[package]]
 name = "state-table"
 version = "0.1.0"
+source = "git+https://github.com/jvishnefske/middleware?rev=514f9747c114f70058361db13365f5efd806775e#514f9747c114f70058361db13365f5efd806775e"
 
 [[package]]
 name = "static_assertions"
@@ -4158,6 +4168,7 @@ dependencies = [
 [[package]]
 name = "wasm-host"
 version = "0.1.0"
+source = "git+https://github.com/jvishnefske/middleware?rev=514f9747c114f70058361db13365f5efd806775e#514f9747c114f70058361db13365f5efd806775e"
 dependencies = [
  "middleware",
  "wasmi",

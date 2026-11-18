@@ -10,9 +10,9 @@ publish = false
 # None: build.rs runs cargo for the payloads' wasm32 build.
 
 [dev-dependencies]
-mw-posix-node = { path = "../../../middleware-posix-node/posix-node" }
-mwctl = { path = "../../../middleware-posix-node/tools/mwctl" }
-middleware = { path = "../../../middleware-posix-node", features = ["std"] }
+mw-posix-node.workspace = true
+mwctl.workspace = true
+middleware = { workspace = true, features = ["std"] }
 recipe-core.workspace = true
 cnc-model = { workspace = true, features = ["alloc"] }
 sha2 = "0.10"

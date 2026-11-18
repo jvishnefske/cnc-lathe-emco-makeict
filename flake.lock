@@ -46,16 +46,16 @@
       "locked": {
         "lastModified": 1795033109,
         "narHash": "sha256-Li7lffgoOKJ47wb0kbDjBlz7u44ZR/PoLij7oRXbMcE=",
-        "ref": "refs/heads/stack/posix-node",
+        "owner": "jvishnefske",
+        "repo": "middleware",
         "rev": "514f9747c114f70058361db13365f5efd806775e",
-        "revCount": 193,
-        "type": "git",
-        "url": "file:///home/j/src/middleware-posix-node"
+        "type": "github"
       },
       "original": {
-        "ref": "refs/heads/stack/posix-node",
-        "type": "git",
-        "url": "file:///home/j/src/middleware-posix-node"
+        "owner": "jvishnefske",
+        "repo": "middleware",
+        "rev": "514f9747c114f70058361db13365f5efd806775e",
+        "type": "github"
       }
     },
     "nixpkgs": {

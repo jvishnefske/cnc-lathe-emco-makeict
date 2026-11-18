@@ -26,6 +26,10 @@ let
       ../web/app/examples
       ../../sender/core/Cargo.toml
       ../../sender/core/src
+      ../../cnc/Cargo.toml
+      ../../cnc/model/Cargo.toml
+      ../../cnc/model/src
+      ../../cnc/model/fixtures
     ];
   };
   pinned = builtins.head (builtins.match ''.*wasm-bindgen = "=([0-9.]+)".*''
@@ -38,7 +42,12 @@ rustPlatform.buildRustPackage {
   version = "0.1.0";
   inherit src;
   cargoRoot = "kd240/web";
-  cargoLock.lockFile = ../web/Cargo.lock;
+  cargoLock = {
+    lockFile = ../web/Cargo.lock;
+    # middleware (cnc/model's machine messages, recipe-core), a git
+    # dependency pinned to a commit: one checkout for every crate in it.
+    outputHashes."middleware-0.5.0" = "sha256-Li7lffgoOKJ47wb0kbDjBlz7u44ZR/PoLij7oRXbMcE=";
+  };
   nativeBuildInputs = [ wasm-bindgen-cli binaryen ];
 
   buildPhase = ''

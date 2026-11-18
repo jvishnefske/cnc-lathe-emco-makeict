@@ -321,3 +321,24 @@ fn synchronised_segments_obey_the_feed_and_threading_limits() {
     r.apply(outs);
     r.until(RUN, PhaseState::Complete, 20_000);
 }
+
+#[test]
+fn the_spindle_does_not_change_under_a_running_program() {
+    use cnc_physical::lathe::RUN;
+    let mut r = Rig::pc_turn_50();
+    r.command(REFERENCE, Command::Start, &[]);
+    r.until(REFERENCE, PhaseState::Complete, 60_000);
+    r.command(SPIN, Command::Start, &[300]);
+    r.until(SPIN, PhaseState::Complete, 3_000);
+    r.command(SPIN, Command::Reset, &[]);
+    r.run_ms(1);
+    r.command(RUN, Command::Start, &[]);
+    assert_eq!(r.lathe.phase(RUN), PhaseState::Running);
+    r.command(SPIN, Command::Start, &[1200]);
+    assert_eq!(r.lathe.phase(SPIN), PhaseState::Aborted);
+    assert_eq!(r.lathe.report(SPIN).2[0], Abort::MotionBusy as i32);
+    r.command(SPIN_STOP, Command::Start, &[]);
+    assert_eq!(r.lathe.phase(SPIN_STOP), PhaseState::Aborted);
+    r.run_ms(500);
+    assert_eq!(r.sim.spindle_rpm(), 300);
+}

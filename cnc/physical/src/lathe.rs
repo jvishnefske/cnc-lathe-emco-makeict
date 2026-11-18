@@ -355,7 +355,12 @@ impl Lathe {
                 if moving {
                     self.flush(out);
                 }
-                if matches!(i, SPIN | SPIN_STOP) && self.spindle_cmd != 0 {
+                // Likewise only a spindle phase that was acting stops the
+                // spindle; one refused at its start leaves it as it is.
+                if matches!(i, SPIN | SPIN_STOP)
+                    && self.phases[i].step != Step::None
+                    && self.spindle_cmd != 0
+                {
                     self.command_spindle(0, out);
                 }
                 self.phases[i].step = Step::None;
@@ -390,6 +395,13 @@ impl Lathe {
         }
         // One thing moves the axes or the turret at a time.
         if matches!(i, REFERENCE | MOVE | RUN | INDEX) && self.other_mover_active(i) {
+            return self.abort(i, Abort::MotionBusy, out);
+        }
+        // Synchronised segments were checked against the spindle's speed
+        // when they were queued: it does not change under a running program
+        // (a process model changes it between motions).
+        let run = self.phases[RUN].state;
+        if matches!(i, SPIN | SPIN_STOP) && run != PhaseState::Idle && !run.is_final() {
             return self.abort(i, Abort::MotionBusy, out);
         }
         match i {

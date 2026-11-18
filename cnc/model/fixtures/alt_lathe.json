@@ -1,0 +1,50 @@
+{
+  "name": "Alt test lathe (longer, finer, faster, other belts, 8 stations)",
+  "xMinMm": -1.0,
+  "xMaxMm": 48.0,
+  "zMinMm": -300.0,
+  "zMaxMm": 0.5,
+  "rapidMmMin": 1200.0,
+  "maxFeedMmMin": 1000.0,
+  "resolutionMm": 0.0005,
+  "accelMmSec2": 200.0,
+  "spindleMinRpm": 150.0,
+  "spindleMaxRpm": 4000.0,
+  "spindleBeltSteps": [
+    {
+      "minRpm": 150.0,
+      "maxRpm": 1500.0
+    },
+    {
+      "minRpm": 250.0,
+      "maxRpm": 2500.0
+    },
+    {
+      "minRpm": 400.0,
+      "maxRpm": 4000.0
+    }
+  ],
+  "threadingMaxRpm": 500.0,
+  "turretStations": 8,
+  "turretIndexSeconds": 2.0,
+  "hasEndOfTravelLimits": false,
+  "requiresReferenceAfterPowerOn": true,
+  "reference": {
+    "xMm": 48.0,
+    "zMm": 0.0,
+    "searchMmMin": 400.0,
+    "xFirst": true
+  },
+  "io": {
+    "xPos": "x_pos",
+    "zPos": "z_pos",
+    "xHome": "x_home",
+    "zHome": "z_home",
+    "spindleRpm": "spindle_rpm",
+    "spindleActual": "spindle_actual",
+    "turretStation": "turret_station",
+    "turretReady": "turret_ready",
+    "estop": "estop",
+    "motion": "motion"
+  }
+}

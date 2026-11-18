@@ -6,4 +6,7 @@
 
 /// The built physical payload, for the PC Turn 50.
 pub const PHYSICAL_WASM: &str = env!("CNC_PHYSICAL_WASM");
-
+/// The physical payload built for `model/fixtures/alt_lathe.json`.
+pub const PHYSICAL_ALT_WASM: &str = env!("CNC_PHYSICAL_ALT_WASM");
+/// The built process payload (one build for every machine).
+pub const PROCESS_WASM: &str = env!("CNC_PROCESS_WASM");

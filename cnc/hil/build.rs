@@ -17,6 +17,7 @@ fn main() {
     }
     println!("cargo:rerun-if-env-changed=CNC_PHYSICAL_CONFIG");
     let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
+    let fixtures = ws.join("model/fixtures");
     let build = |package: &str, dir: &str, config: Option<PathBuf>| -> PathBuf {
         let target_dir = out.join(dir);
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
@@ -53,5 +54,13 @@ fn main() {
         ))
     };
     let physical = build("cnc-physical", "wasm", None);
+    let alt = build(
+        "cnc-physical",
+        "wasm-alt",
+        Some(fixtures.join("alt_lathe.json")),
+    );
+    let process = build("cnc-process", "wasm", None);
     println!("cargo:rustc-env=CNC_PHYSICAL_WASM={}", physical.display());
+    println!("cargo:rustc-env=CNC_PHYSICAL_ALT_WASM={}", alt.display());
+    println!("cargo:rustc-env=CNC_PROCESS_WASM={}", process.display());
 }

@@ -13,7 +13,7 @@
 # `cargo build --release --target wasm32-unknown-unknown -p cnc-physical`).
 [workspace]
 resolver = "2"
-members = ["model", "physical", "hil"]
+members = ["model", "physical", "process", "hil"]
 
 [workspace.package]
 edition = "2021"

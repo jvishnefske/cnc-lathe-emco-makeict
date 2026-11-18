@@ -16,4 +16,6 @@ middleware = { path = "../../../middleware-posix-node", features = ["std"] }
 recipe-core.workspace = true
 cnc-model = { workspace = true, features = ["alloc"] }
 sha2 = "0.10"
+serde_json.workspace = true
+cnc-process = { path = "../process" }
 

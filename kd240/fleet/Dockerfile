@@ -1,6 +1,6 @@
 # The fleet server's image (kd240/fleet/README.md).
 #
-# The workspace depends on middleware by path (../../../middleware) while
+# The workspace depends on middleware by path (../../../middleware-posix-node) while
 # that branch is unpublished, so the build context is the directory that
 # holds both checkouts:
 #
@@ -14,7 +14,7 @@ ARG LATHE=cnc-lathe-emco-makeict
 WORKDIR /src
 # (middleware/target is large: a .dockerignore beside both checkouts with
 # `*/target` keeps it out of the context.)
-COPY middleware middleware
+COPY middleware-posix-node middleware-posix-node
 COPY ${LATHE}/kd240/fleet lathe/kd240/fleet
 WORKDIR /src/lathe/kd240/fleet
 RUN rm -rf target \

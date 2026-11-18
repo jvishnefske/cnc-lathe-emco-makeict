@@ -20,6 +20,13 @@ fn profile_from_js(profile: JsValue) -> MachineProfile {
     serde_wasm_bindgen::from_value(profile).unwrap_or_else(|_| MachineProfile::pc_turn_50_default())
 }
 
+/// The PC Turn 50's profile as the core holds it (its physical numbers
+/// from `cnc/model`), for the UI to start from instead of a copy.
+#[wasm_bindgen(js_name = defaultProfile)]
+pub fn default_profile() -> JsValue {
+    to_js(&MachineProfile::pc_turn_50_default())
+}
+
 #[wasm_bindgen]
 pub struct Program {
     inner: crate::gcode::Program,
@@ -29,7 +36,9 @@ pub struct Program {
 impl Program {
     /// Parse G-code text. Never throws — syntax problems come back as diagnostics.
     pub fn parse(text: &str) -> Program {
-        Program { inner: crate::gcode::Program::parse(text) }
+        Program {
+            inner: crate::gcode::Program::parse(text),
+        }
     }
 
     pub fn line_count(&self) -> u32 {
@@ -62,7 +71,9 @@ pub struct VirtualMachine {
 impl VirtualMachine {
     #[wasm_bindgen(constructor)]
     pub fn new(profile: JsValue /* MachineProfile */) -> VirtualMachine {
-        VirtualMachine { inner: crate::machine::VirtualMachine::new(profile_from_js(profile)) }
+        VirtualMachine {
+            inner: crate::machine::VirtualMachine::new(profile_from_js(profile)),
+        }
     }
 
     /// Advance the simulation to `now_ms` and consume bytes the host sent.
@@ -91,7 +102,9 @@ pub struct Session {
 impl Session {
     #[wasm_bindgen(constructor)]
     pub fn new(profile: JsValue /* MachineProfile */) -> Session {
-        Session { inner: crate::session::Session::new(profile_from_js(profile)) }
+        Session {
+            inner: crate::session::Session::new(profile_from_js(profile)),
+        }
     }
 
     pub fn load_program(&mut self, program: &Program) {

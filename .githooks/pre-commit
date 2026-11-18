@@ -53,6 +53,13 @@ CRATES=(
     "kd240/web/rules|--all-targets"
     "kd240/web/app|--all-targets"
     "kd240/web/app|--target wasm32-unknown-unknown"
+    "cnc|--workspace --all-targets"
+    "cnc/model|--all-targets"
+    "cnc/physical|--all-targets"
+    "cnc/physical|--target wasm32-unknown-unknown"
+    "cnc/process|--all-targets"
+    "cnc/process|--target wasm32-unknown-unknown"
+    "cnc/hil|--all-targets"
     "firmware/rs485-bridge|"
     "firmware/rs485-bridge|--no-default-features --features board-f407-discovery"
 )

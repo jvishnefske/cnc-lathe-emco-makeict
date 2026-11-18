@@ -44,18 +44,18 @@
         ]
       },
       "locked": {
-        "lastModified": 1794982455,
-        "narHash": "sha256-Jy5KZMH74XvJZoIEDibFG3uJSdWYrmWMwcrdCwQT2XM=",
-        "ref": "refs/heads/stack/signed-updates",
-        "rev": "455c983ce62da9608ce23c5fe1cd4d8330753cf9",
-        "revCount": 190,
+        "lastModified": 1795033109,
+        "narHash": "sha256-Li7lffgoOKJ47wb0kbDjBlz7u44ZR/PoLij7oRXbMcE=",
+        "ref": "refs/heads/stack/posix-node",
+        "rev": "514f9747c114f70058361db13365f5efd806775e",
+        "revCount": 193,
         "type": "git",
-        "url": "file:///home/j/src/middleware"
+        "url": "file:///home/j/src/middleware-posix-node"
       },
       "original": {
-        "ref": "refs/heads/stack/signed-updates",
+        "ref": "refs/heads/stack/posix-node",
         "type": "git",
-        "url": "file:///home/j/src/middleware"
+        "url": "file:///home/j/src/middleware-posix-node"
       }
     },
     "nixpkgs": {

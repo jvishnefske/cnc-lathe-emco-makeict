@@ -57,7 +57,7 @@ token target=host:
 # tracked files, uncommitted changes included; not its target/) instead of
 # the commit flake.lock pins, e.g. `just dev-middleware build ..#emco-fleet`.
 dev-middleware *args:
-    nix {{args}} --override-input middleware git+file://$(realpath ../../middleware)
+    nix {{args}} --override-input middleware git+file://$(realpath ../../middleware-posix-node)
 
 # Move the flake's middleware pin to that checkout's branch head.
 bump-middleware:

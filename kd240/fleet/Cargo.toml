@@ -28,11 +28,12 @@ ureq = { version = "3", features = ["json"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "signal", "time", "fs", "io-util"] }
 tempfile = "3"
-# Middleware's trust types and verifier (`loader::trust`). A path into the
-# sibling checkout while stack/signed-updates is unpublished; it becomes a
-# git dependency pinned to a commit once that branch is on GitHub.
-middleware = { path = "../../../middleware", default-features = false, features = ["trust"] }
-mwctl = { path = "../../../middleware/tools/mwctl" }
+# Middleware's trust types and verifier (`loader::trust`), and mwctl's
+# signers. A path into the sibling worktree `middleware-posix-node` (branch
+# stack/posix-node, on stack/signed-updates) while it is unpublished; it
+# becomes a git dependency pinned to a commit once that branch is on GitHub.
+middleware = { path = "../../../middleware-posix-node", default-features = false, features = ["trust"] }
+mwctl = { path = "../../../middleware-posix-node/tools/mwctl" }
 
 [profile.release]
 lto = true

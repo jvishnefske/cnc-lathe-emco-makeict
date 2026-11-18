@@ -1,0 +1,50 @@
+{
+  "name": "EMCO PC Turn 50",
+  "xMinMm": -0.5,
+  "xMaxMm": 48.0,
+  "zMinMm": -228.0,
+  "zMaxMm": 0.5,
+  "rapidMmMin": 750.0,
+  "maxFeedMmMin": 750.0,
+  "resolutionMm": 0.001,
+  "accelMmSec2": 200.0,
+  "spindleMinRpm": 130.0,
+  "spindleMaxRpm": 3000.0,
+  "spindleBeltSteps": [
+    {
+      "minRpm": 130.0,
+      "maxRpm": 1300.0
+    },
+    {
+      "minRpm": 200.0,
+      "maxRpm": 2000.0
+    },
+    {
+      "minRpm": 300.0,
+      "maxRpm": 3000.0
+    }
+  ],
+  "threadingMaxRpm": 400.0,
+  "turretStations": 6,
+  "turretIndexSeconds": 2.0,
+  "hasEndOfTravelLimits": false,
+  "requiresReferenceAfterPowerOn": true,
+  "reference": {
+    "xMm": 48.0,
+    "zMm": 0.0,
+    "searchMmMin": 300.0,
+    "xFirst": true
+  },
+  "io": {
+    "xPos": "x_pos",
+    "zPos": "z_pos",
+    "xHome": "x_home",
+    "zHome": "z_home",
+    "spindleRpm": "spindle_rpm",
+    "spindleActual": "spindle_actual",
+    "turretStation": "turret_station",
+    "turretReady": "turret_ready",
+    "estop": "estop",
+    "motion": "motion"
+  }
+}

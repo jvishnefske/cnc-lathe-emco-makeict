@@ -7,16 +7,13 @@ use emco_rules::*;
 use std::path::PathBuf;
 
 /// Matches emco-pcturn50.ini: [JOINT_0]HOME 48, [JOINT_1]HOME 0, TOOL_CHANGE_POSITION set.
-const SIM: Machine = Machine {
-    x_retract: 48.0,
-    z_park: 0.0,
-    tool_change_retracts: true,
-};
-const BARE: Machine = Machine {
-    x_retract: 48.0,
-    z_park: 0.0,
-    tool_change_retracts: false,
-};
+/// Matches emco-pcturn50.ini (and cnc/model's PhysicalConfig::pc_turn_50).
+fn sim() -> Machine {
+    Machine::pc_turn_50(true)
+}
+fn bare() -> Machine {
+    Machine::pc_turn_50(false)
+}
 
 const HEADER: &str = "( Stock : 12 mm alu )\n( Tools : T1 turning )\n";
 const GOOD_TAIL: &str = "M5\nG53 G0 X96 Z0\nM30\n";
@@ -106,30 +103,32 @@ fn reference_gate_test_machine_off_is_gated() {
 
 #[test]
 fn belt_test_ranges_match_doc() {
-    assert_eq!(belt_range(belt(1)), (130, 1300));
-    assert_eq!(belt_range(belt(2)), (200, 2000));
-    assert_eq!(belt_range(belt(3)), (300, 3000));
+    assert_eq!(sim().belt_range(belt(1)), (130, 1300));
+    assert_eq!(sim().belt_range(belt(2)), (200, 2000));
+    assert_eq!(sim().belt_range(belt(3)), (300, 3000));
 }
 
 #[test]
 fn belt_test_clamp() {
-    assert_eq!(clamp_rpm(belt(1), 3000.0), 1300.0);
-    assert_eq!(clamp_rpm(belt(3), 100.0), 300.0);
-    assert_eq!(clamp_rpm(belt(2), 800.0), 800.0);
+    assert_eq!(sim().clamp_rpm(belt(1), 3000.0), 1300.0);
+    assert_eq!(sim().clamp_rpm(belt(3), 100.0), 300.0);
+    assert_eq!(sim().clamp_rpm(belt(2), 800.0), 800.0);
 }
 
 #[test]
 fn belt_test_violations() {
-    assert_eq!(spindle_violation(belt(2), 0.0, false), None);
-    assert_eq!(spindle_violation(belt(2), 1200.0, false), None);
-    assert_eq!(spindle_violation(belt(2), -1200.0, false), None); // M4
-    assert!(spindle_violation(belt(1), 1400.0, false)
+    assert_eq!(sim().spindle_violation(belt(2), 0.0, false), None);
+    assert_eq!(sim().spindle_violation(belt(2), 1200.0, false), None);
+    assert_eq!(sim().spindle_violation(belt(2), -1200.0, false), None); // M4
+    assert!(sim()
+        .spindle_violation(belt(1), 1400.0, false)
         .unwrap()
         .contains("belt 1"));
-    assert!(spindle_violation(belt(2), 500.0, true)
+    assert!(sim()
+        .spindle_violation(belt(2), 500.0, true)
         .unwrap()
         .contains("400"));
-    assert_eq!(spindle_violation(belt(2), 350.0, true), None);
+    assert_eq!(sim().spindle_violation(belt(2), 350.0, true), None);
 }
 
 // -----------------------------------------------------------------------------
@@ -140,14 +139,14 @@ fn belt_test_violations() {
 fn preflight_test_example_programs_are_clean() {
     for name in ["tutorial-part.ngc", "stepped-shaft.ngc"] {
         let text = repo_gcode(name);
-        assert_eq!(preflight(&text, belt(2), &SIM), vec![], "program={name}");
+        assert_eq!(preflight(&text, belt(2), &sim()), vec![], "program={name}");
     }
 }
 
 #[test]
 fn preflight_test_stepped_shaft_on_belt_1_flags_speed() {
     let text = repo_gcode("stepped-shaft.ngc");
-    let f = preflight(&text, belt(1), &SIM);
+    let f = preflight(&text, belt(1), &sim());
     let errs = errors(&f);
     assert!(errs.iter().any(|e| e.message.contains("S1400")), "{errs:?}");
 }
@@ -155,7 +154,7 @@ fn preflight_test_stepped_shaft_on_belt_1_flags_speed() {
 #[test]
 fn preflight_test_half_retract_under_g7() {
     let prog = format!("{HEADER}G21 G7\nG53 G0 X48\nT1 M6\n{GOOD_TAIL}");
-    let f = preflight(&prog, belt(2), &SIM);
+    let f = preflight(&prog, belt(2), &sim());
     let errs = errors(&f);
     assert_eq!(errs.len(), 1, "{errs:?}");
     assert!(errs[0].message.contains("half way"));
@@ -165,13 +164,13 @@ fn preflight_test_half_retract_under_g7() {
 #[test]
 fn preflight_test_x48_is_full_retract_in_radius_mode() {
     let prog = format!("{HEADER}G21 G8\nG53 G0 X48\nT1 M6\nM5\nG53 G0 X48 Z0\nM30\n");
-    assert_eq!(preflight(&prog, belt(2), &SIM), vec![]);
+    assert_eq!(preflight(&prog, belt(2), &sim()), vec![]);
 }
 
 #[test]
 fn preflight_test_first_move_not_a_retract() {
     let prog = format!("{HEADER}G21 G7\nG0 X14 Z1\n{GOOD_TAIL}");
-    let f = preflight(&prog, belt(2), &SIM);
+    let f = preflight(&prog, belt(2), &sim());
     let errs = errors(&f);
     assert!(errs[0].message.contains("G53 G0 X96"));
 }
@@ -179,7 +178,7 @@ fn preflight_test_first_move_not_a_retract() {
 #[test]
 fn preflight_test_tool_change_with_spindle_on() {
     let prog = format!("{HEADER}G21 G7\nG53 G0 X96\nS800 M3\nT3 M6\n{GOOD_TAIL}");
-    let f = preflight(&prog, belt(2), &SIM);
+    let f = preflight(&prog, belt(2), &sim());
     assert!(errors(&f)
         .iter()
         .any(|e| e.message.contains("spindle running")));
@@ -189,10 +188,10 @@ fn preflight_test_tool_change_with_spindle_on() {
 fn preflight_test_tool_change_without_retract_when_ini_does_not_retract() {
     let prog = format!("{HEADER}G21 G7\nG53 G0 X96\nG0 X14 Z1\nT3 M6\n{GOOD_TAIL}");
     assert_eq!(
-        errors(&preflight(&prog, belt(2), &SIM)),
+        errors(&preflight(&prog, belt(2), &sim())),
         Vec::<&Finding>::new()
     );
-    let f = preflight(&prog, belt(2), &BARE);
+    let f = preflight(&prog, belt(2), &bare());
     assert!(errors(&f).iter().any(|e| e.message.contains("retract")));
 }
 
@@ -200,7 +199,7 @@ fn preflight_test_tool_change_without_retract_when_ini_does_not_retract() {
 fn preflight_test_threading_speed() {
     let prog =
         format!("{HEADER}G21 G7\nG53 G0 X96\nS500 M3\nG76 P1 Z-10 I-1 J0.1 K0.6\n{GOOD_TAIL}");
-    let f = preflight(&prog, belt(2), &SIM);
+    let f = preflight(&prog, belt(2), &sim());
     assert!(errors(&f).iter().any(|e| e.message.contains("Threading")));
 }
 
@@ -208,7 +207,7 @@ fn preflight_test_threading_speed() {
 fn preflight_test_css_s_is_not_rpm() {
     let prog = format!("{HEADER}G21 G7\nG53 G0 X96\nG96 S5000 D2000 M3\nG97\n{GOOD_TAIL}");
     assert_eq!(
-        errors(&preflight(&prog, belt(2), &SIM)),
+        errors(&preflight(&prog, belt(2), &sim())),
         Vec::<&Finding>::new()
     );
 }
@@ -216,7 +215,7 @@ fn preflight_test_css_s_is_not_rpm() {
 #[test]
 fn preflight_test_house_style_warnings() {
     let prog = "G53 G0 X48\nG0 X10 Z1\nM30\n";
-    let f = preflight(prog, belt(2), &SIM);
+    let f = preflight(prog, belt(2), &sim());
     assert_eq!(errors(&f), Vec::<&Finding>::new());
     let msgs = f
         .iter()
@@ -233,7 +232,7 @@ fn preflight_test_subroutine_bodies_are_not_first_move() {
     let prog = format!(
         "{HEADER}o<r> sub\n G0 X[#1] Z0.5\no<r> endsub\nG21 G7\nG53 G0 X96\no<r> call [10]\n{GOOD_TAIL}"
     );
-    assert_eq!(preflight(&prog, belt(2), &SIM), vec![]);
+    assert_eq!(preflight(&prog, belt(2), &sim()), vec![]);
 }
 
 // -----------------------------------------------------------------------------

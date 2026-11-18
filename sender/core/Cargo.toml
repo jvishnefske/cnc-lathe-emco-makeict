@@ -11,6 +11,8 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The machine's hardware numbers, in one place (cnc/model).
+cnc-model = { path = "../../cnc/model" }
 
 # The wasm-bindgen layer is only compiled for the wasm32 target, so native
 # `cargo test` never needs wasm-bindgen or a browser.

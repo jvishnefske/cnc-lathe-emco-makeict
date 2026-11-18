@@ -101,15 +101,17 @@ impl LoadedProgram {
     }
 }
 
-/// The machine the rules reason about, from the link's profile. The
-/// session's reference point is X = `xMaxMm` (radius), Z = 0, and its tool
-/// changes do not move the carriage.
+/// The machine the rules reason about, from the link's profile: its
+/// physical configuration (the reference point is where it retracts and
+/// parks, its belts and threading limit), with tool changes that do not
+/// move the carriage. A profile without three belts keeps the PC Turn 50's
+/// spindle rules.
 pub fn machine_from_profile(p: &MachineProfile) -> Machine {
-    Machine {
-        x_retract: p.x_max_mm,
-        z_park: 0.0,
-        tool_change_retracts: false,
-    }
+    Machine::from_physical(&p.physical, false).unwrap_or(Machine {
+        x_retract: p.reference.x_mm,
+        z_park: p.reference.z_mm,
+        ..Machine::pc_turn_50(false)
+    })
 }
 
 pub struct Screen {
@@ -187,7 +189,7 @@ impl Screen {
             power: PowerEdge::default(),
             ask_belt: false,
             belt,
-            rpm: emco_rules::clamp_rpm(belt, handler::DEFAULT_RPM),
+            rpm: machine.clamp_rpm(belt, handler::DEFAULT_RPM),
             spindle: SpindleWatch::default(),
             spindle_stop_pending: false,
             ladder: RunLadder::default(),
@@ -384,6 +386,7 @@ impl Screen {
         self.prev_busy = busy;
 
         if let Some((msg, action)) = self.spindle.update(
+            &self.machine,
             self.belt,
             st.spindle_rpm,
             st.threading,
@@ -397,7 +400,11 @@ impl Screen {
                 SpindleAction::None => {}
             }
         }
-        if emco_rules::spindle_violation(self.belt, st.spindle_rpm, st.threading).is_none() {
+        if self
+            .machine
+            .spindle_violation(self.belt, st.spindle_rpm, st.threading)
+            .is_none()
+        {
             self.spindle_stop_pending = false;
         }
         // The machine takes MDI only when idle, so the stop waits for that.
@@ -543,9 +550,9 @@ impl Screen {
     pub fn set_belt(&mut self, belt: Belt, announce: bool, prefs: &mut dyn Prefs) {
         self.belt = belt;
         prefs.set(PREF_BELT, &belt.number().to_string());
-        self.rpm = emco_rules::clamp_rpm(belt, self.rpm);
+        self.rpm = self.machine.clamp_rpm(belt, self.rpm);
         if announce {
-            self.log(handler::belt_log(belt));
+            self.log(handler::belt_log(&self.machine, belt));
         }
         self.run_preflight();
     }
@@ -564,7 +571,7 @@ impl Screen {
         if !self.referenced() {
             return;
         }
-        let rpm = emco_rules::clamp_rpm(self.belt, self.rpm);
+        let rpm = self.machine.clamp_rpm(self.belt, self.rpm);
         let m = if direction < 0 { "M4" } else { "M3" };
         link.send(Request::Mdi {
             lines: vec![format!("{m} S{}", emco_rules::py::g(rpm))],

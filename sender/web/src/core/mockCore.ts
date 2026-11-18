@@ -10,6 +10,7 @@
  */
 
 import type { CoreApi, ProgramApi, SessionApi, VirtualMachineApi } from "./api";
+import { DEFAULT_PROFILE } from "../profile";
 import type {
   Backplot,
   Command,
@@ -525,5 +526,9 @@ export class MockCore implements CoreApi {
 
   createVirtualMachine(profile: MachineProfile): VirtualMachineApi {
     return new MockVirtualMachine(profile);
+  }
+
+  defaultProfile(): MachineProfile {
+    return DEFAULT_PROFILE;
   }
 }

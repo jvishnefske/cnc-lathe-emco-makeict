@@ -1,0 +1,41 @@
+# The lathe on middleware (README.md here): S88 physical and procedural
+# models as WASM payloads for mw-posix-node, and the model they share.
+#
+#   model/     cnc-model     the physical configuration (one machine's
+#                            travel, speeds, belts, turret, switches, I/O),
+#                            the control-module traits, and the wire between
+#                            the process and physical payloads. no_std+alloc.
+#   physical/  cnc-physical  the physical model: a WASM payload serving the
+#                            unit's equipment phases over the node's
+#                            control-module points (ABI 8).
+#
+# Built for the host (tests) and for wasm32-unknown-unknown (the payloads,
+# `cargo build --release --target wasm32-unknown-unknown -p cnc-physical`).
+[workspace]
+resolver = "2"
+members = ["model", "physical", "hil"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.1.0"
+
+[workspace.dependencies]
+cnc-model = { path = "model", default-features = false }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = "1"
+# middleware (stack/posix-node, the sibling worktree; a git dependency once
+# published): the ABI's machine messages, and recipe-core's S88 phases.
+middleware = { path = "../../middleware-posix-node", default-features = false }
+recipe-core = { path = "../../middleware-posix-node/recipe-core" }
+mw-payload = { path = "../../middleware-posix-node/payloads/sdk" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+codegen-units = 1
+strip = true
+
+[profile.dev]
+panic = "abort"

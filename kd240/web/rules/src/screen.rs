@@ -8,7 +8,7 @@
 //! milliseconds), so a web screen can make the same decisions and they can
 //! be tested natively. Wording is the handler's.
 
-use crate::{belt_range, py, Belt, Machine, BELT_RANGES};
+use crate::{py, Belt, Machine};
 
 /// Single-block first runs start slow (doc 40 §10.3: "feed override low").
 pub const FIRST_RUN_FEED_OVERRIDE: u32 = 25;
@@ -272,17 +272,18 @@ pub fn home_log(machine: &Machine) -> String {
 }
 
 /// Logged when the operator says which belt is fitted.
-pub fn belt_log(belt: Belt) -> String {
-    let (lo, hi) = belt_range(belt);
+pub fn belt_log(machine: &Machine, belt: Belt) -> String {
+    let (lo, hi) = machine.belt_range(belt);
     format!("Belt {} fitted: {}–{} rpm.", belt.number(), lo, hi)
 }
 
 /// The belt question's choices, as the handler words them.
-pub fn belt_choices() -> Vec<(Belt, String)> {
-    BELT_RANGES
-        .iter()
-        .filter_map(|(b, (lo, hi))| {
-            Belt::new(*b).map(|belt| (belt, format!("Belt {b}  ({lo}–{hi} rpm)")))
+pub fn belt_choices(machine: &Machine) -> Vec<(Belt, String)> {
+    Belt::all()
+        .into_iter()
+        .map(|belt| {
+            let (lo, hi) = machine.belt_range(belt);
+            (belt, format!("Belt {}  ({lo}–{hi} rpm)", belt.number()))
         })
         .collect()
 }
@@ -357,13 +358,14 @@ impl SpindleWatch {
     /// violation is seen.
     pub fn update(
         &mut self,
+        machine: &Machine,
         belt: Belt,
         rpm: f64,
         threading: bool,
         auto_running: bool,
         paused: bool,
     ) -> Option<(String, SpindleAction)> {
-        let violation = crate::spindle_violation(belt, rpm, threading);
+        let violation = machine.spindle_violation(belt, rpm, threading);
         let out = match &violation {
             Some(v) if Some(v) != self.last_violation.as_ref() => {
                 let action = if auto_running && !paused {
@@ -528,7 +530,14 @@ mod tests {
         x_retract: 48.0,
         z_park: 0.0,
         tool_change_retracts: true,
+        belts: [(130, 1300), (200, 2000), (300, 3000)],
+        threading_max_rpm: 400,
     };
+
+    #[test]
+    fn the_sim_machine_is_the_pc_turn_50() {
+        assert_eq!(SIM, Machine::pc_turn_50(true));
+    }
 
     #[test]
     fn wizard_navigation_clamps_like_wizard_show() {
@@ -598,8 +607,8 @@ mod tests {
             home_log(&SIM),
             "Referencing: X drives out to X48 (radius), Z to Z0. Keep the path clear."
         );
-        assert_eq!(belt_log(DEFAULT_BELT), "Belt 2 fitted: 200–2000 rpm.");
-        assert_eq!(belt_choices()[0].1, "Belt 1  (130–1300 rpm)");
+        assert_eq!(belt_log(&SIM, DEFAULT_BELT), "Belt 2 fitted: 200–2000 rpm.");
+        assert_eq!(belt_choices(&SIM)[0].1, "Belt 1  (130–1300 rpm)");
         assert_eq!(proven_label(None, false), "No program loaded.");
         assert!(proven_label(Some("a"), false)
             .contains("NOT PROVEN. The first run is single block at 25% feed"));
@@ -618,22 +627,26 @@ mod tests {
     fn spindle_watch_acts_once_per_violation() {
         let mut w = SpindleWatch::default();
         let b1 = Belt::new(1).unwrap();
-        assert_eq!(w.update(b1, 800.0, false, false, false), None);
-        let (msg, act) = w.update(b1, 1400.0, false, true, false).unwrap();
+        assert_eq!(w.update(&SIM, b1, 800.0, false, false, false), None);
+        let (msg, act) = w.update(&SIM, b1, 1400.0, false, true, false).unwrap();
         assert!(msg.starts_with("SPINDLE: 1400 rpm is outside belt 1"));
         assert_eq!(act, SpindleAction::Pause);
         assert_eq!(
-            w.update(b1, 1400.0, false, true, true),
+            w.update(&SIM, b1, 1400.0, false, true, true),
             None,
             "same violation: once"
         );
-        assert_eq!(w.update(b1, 0.0, false, false, false), None);
+        assert_eq!(w.update(&SIM, b1, 0.0, false, false, false), None);
         assert_eq!(
-            w.update(DEFAULT_BELT, 500.0, true, false, false).unwrap().1,
+            w.update(&SIM, DEFAULT_BELT, 500.0, true, false, false)
+                .unwrap()
+                .1,
             SpindleAction::StopSpindle
         );
         assert_eq!(
-            w.update(DEFAULT_BELT, 600.0, true, true, true).unwrap().1,
+            w.update(&SIM, DEFAULT_BELT, 600.0, true, true, true)
+                .unwrap()
+                .1,
             SpindleAction::None
         );
     }

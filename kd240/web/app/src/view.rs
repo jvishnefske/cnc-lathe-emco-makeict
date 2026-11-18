@@ -11,7 +11,7 @@ use crate::screen::{Prefs, Screen, Tab};
 use crate::toolpath;
 use egui::{Align, Color32, RichText, Ui};
 use emco_rules::screen::{self as handler, Procedure, Wizard};
-use emco_rules::{belt_range, Belt, Severity};
+use emco_rules::{Belt, Severity};
 
 /// Choosing a local file to upload (a browser file picker on wasm32).
 pub trait FilePicker {
@@ -290,7 +290,7 @@ fn spindle_box(ui: &mut Ui, s: &mut Screen, link: &mut dyn MachineLink, prefs: &
         ui.label(RichText::new("Belt and spindle").strong());
         ui.horizontal(|ui| {
             for b in Belt::all() {
-                let (lo, hi) = belt_range(b);
+                let (lo, hi) = s.machine.belt_range(b);
                 if ui
                     .radio(s.belt == b, format!("Belt {}\n{lo}–{hi}", b.number()))
                     .clicked()
@@ -300,7 +300,7 @@ fn spindle_box(ui: &mut Ui, s: &mut Screen, link: &mut dyn MachineLink, prefs: &
                 }
             }
         });
-        let (lo, hi) = belt_range(s.belt);
+        let (lo, hi) = s.machine.belt_range(s.belt);
         let ok = s.referenced();
         ui.horizontal(|ui| {
             ui.add(
@@ -324,7 +324,7 @@ fn spindle_box(ui: &mut Ui, s: &mut Screen, link: &mut dyn MachineLink, prefs: &
             if st.threading {
                 text.push_str(&format!(
                     "  · threading (limit {} rpm)",
-                    emco_rules::THREADING_MAX_RPM
+                    s.machine.threading_max_rpm
                 ));
             }
             ui.label(text);
@@ -805,7 +805,7 @@ fn belt_question(ctx: &egui::Context, s: &mut Screen, prefs: &mut dyn Prefs) {
                 "Tell the control which belt position is fitted (doc 40 §6).\n\
                  The real control uses it for speed monitoring and threading.",
             );
-            for (belt, label) in handler::belt_choices() {
+            for (belt, label) in handler::belt_choices(&s.machine) {
                 let text = if belt == s.belt {
                     format!("{label}  (current)")
                 } else {

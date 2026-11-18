@@ -119,6 +119,10 @@ export type MachineProfile = {
   turretIndexSeconds: number;
   hasEndOfTravelLimits: boolean; // false — travel ends at mechanical stops
   requiresReferenceAfterPowerOn: boolean; // true — no absolute position memory
+  /** Where the reference switches are and how they are approached (cnc/model). */
+  reference?: { xMm: number; zMm: number; searchMmMin: number; xFirst: boolean };
+  /** The control-module points the physical model's channels bind to (cnc/model). */
+  io?: Record<string, string>;
   /**
    * The physical PC link. The machine's DB9 (X300) is an RS-485 multidrop
    * bus (pin 2 GND, 3 DATA−, 8 DATA+), NOT RS-232, and its wire framing is

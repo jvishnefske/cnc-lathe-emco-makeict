@@ -1,12 +1,18 @@
-//! Machine profile: every machine-specific number lives here, not in code.
+//! Machine profile: the machine's hardware ([`PhysicalConfig`], from
+//! `cnc/model`, the one place its numbers live) plus the sender's own
+//! choices: the link and the dialect.
 //!
-//! The default values are the **real PC Turn 50 numbers from EMCO's own
-//! manuals and schematics** (see `docs/_machine-facts.md`). They have been
-//! read from documentation but **not re-measured at the machine**, so treat
-//! them as documented-but-unconfirmed. Items nobody has documented at all
-//! keep an explicit UNVERIFIED tag.
+//! The physical numbers are the **real PC Turn 50 numbers from EMCO's own
+//! manuals and schematics** (see `docs/_machine-facts.md`,
+//! `cnc_model::PhysicalConfig::pc_turn_50`). They have been read from
+//! documentation but **not re-measured at the machine**, so treat them as
+//! documented-but-unconfirmed. The JSON is unchanged: the physical fields
+//! sit at the top level beside `link` and `dialect`, and the profile reads
+//! them as its own fields (it dereferences to the [`PhysicalConfig`]).
 
 use serde::{Deserialize, Serialize};
+
+pub use cnc_model::{BeltStep, PhysicalConfig};
 
 /// Default G54 work offset on Z, machine coordinates: "a piece of stock whose
 /// face was touched off 50 mm in from the reference point". Matches the
@@ -49,47 +55,28 @@ pub struct LinkConfig {
     pub baud: u32,
 }
 
-/// One spindle belt position. Changed by physically moving a belt, so this is
-/// operator-declared, never machine-reported.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct BeltStep {
-    pub min_rpm: f64,
-    pub max_rpm: f64,
-}
-
 /// See `sender/INTERFACE.md` for the JSON shape (camelCase field names).
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct MachineProfile {
-    pub name: String,
-    /// X travel, **radius** mm.
-    pub x_min_mm: f64,
-    pub x_max_mm: f64,
-    pub z_min_mm: f64,
-    pub z_max_mm: f64,
-    pub rapid_mm_min: f64,
-    pub max_feed_mm_min: f64,
-    /// Step resolution, mm.
-    pub resolution_mm: f64,
-    pub accel_mm_sec2: f64,
-    pub spindle_min_rpm: f64,
-    pub spindle_max_rpm: f64,
-    /// Belt positions; the active one is operator-declared, not sensed.
-    pub spindle_belt_steps: Vec<BeltStep>,
-    /// Threading (G33/G78) is only synchronised up to this speed.
-    pub threading_max_rpm: f64,
-    pub turret_stations: u32,
-    pub turret_index_seconds: f64,
-    /// False on this machine: travel ends at mechanical stops and the stepper
-    /// stalls audibly, silently losing position. When false the simulator
-    /// models that stall; when true it raises a clean limit alarm instead.
-    pub has_end_of_travel_limits: bool,
-    /// True on this machine: no absolute position memory, so the reference
-    /// point must be re-approached after every power-off.
-    pub requires_reference_after_power_on: bool,
+    /// The machine itself: travel, speeds, belts, turret, switches, I/O.
+    #[serde(flatten)]
+    pub physical: PhysicalConfig,
     pub link: LinkConfig,
     pub dialect: DialectKind,
+}
+
+impl std::ops::Deref for MachineProfile {
+    type Target = PhysicalConfig;
+    fn deref(&self) -> &PhysicalConfig {
+        &self.physical
+    }
+}
+
+impl std::ops::DerefMut for MachineProfile {
+    fn deref_mut(&mut self) -> &mut PhysicalConfig {
+        &mut self.physical
+    }
 }
 
 impl MachineProfile {
@@ -98,54 +85,11 @@ impl MachineProfile {
         serde_json::from_str(json).map_err(|e| e.to_string())
     }
 
-    /// The EMCO PC Turn 50, from EMCO's manuals and schematics
-    /// (`docs/_machine-facts.md`). Documented but not re-measured at the
-    /// machine, except where marked UNVERIFIED (nobody has documented those).
+    /// The EMCO PC Turn 50 ([`PhysicalConfig::pc_turn_50`]) on its RS-485
+    /// link, speaking its own dialect.
     pub fn pc_turn_50_default() -> MachineProfile {
         MachineProfile {
-            name: "EMCO PC Turn 50".to_string(),
-            // From EMCO manual: X travel 48 mm of radius, not re-measured.
-            // The -0.5 mm margin below centreline matches the LinuxCNC sim
-            // config (AXIS_X MIN_LIMIT) and is what lets a facing pass cut
-            // slightly past centre so no pip is left.
-            x_min_mm: -0.5,
-            x_max_mm: 48.0,
-            // From EMCO manual: Z travel 228 mm usable (275 mm mechanical),
-            // not re-measured. Machine zero is at the reference point and all
-            // working travel runs negative from it (toward the chuck); the
-            // +0.5 mm margin matches the LinuxCNC sim config (AXIS_Z
-            // MAX_LIMIT).
-            z_min_mm: -228.0,
-            z_max_mm: 0.5,
-            // From EMCO manual: rapid traverse 750 mm/min.
-            rapid_mm_min: 750.0,
-            // From EMCO manual: feed range 0-750 mm/min (1500 absolute max).
-            max_feed_mm_min: 750.0,
-            // From EMCO manual: step resolution 0.001 mm.
-            resolution_mm: 0.001,
-            // UNVERIFIED: axis acceleration is not documented anywhere;
-            // this is a guess pending measurement at the lathe.
-            accel_mm_sec2: 200.0,
-            // From EMCO manual: 130-3000 rpm across three belt steps.
-            spindle_min_rpm: 130.0,
-            spindle_max_rpm: 3000.0,
-            spindle_belt_steps: vec![
-                BeltStep { min_rpm: 130.0, max_rpm: 1300.0 },
-                BeltStep { min_rpm: 200.0, max_rpm: 2000.0 },
-                BeltStep { min_rpm: 300.0, max_rpm: 3000.0 },
-            ],
-            // From EMCO manual: thread cutting synchronised only up to 400 rpm.
-            threading_max_rpm: 400.0,
-            // From EMCO manual: 6 stations (3 external + 3 internal). NOT 8.
-            turret_stations: 6,
-            // UNVERIFIED: turret index time is not documented; guess.
-            turret_index_seconds: 2.0,
-            // From EMCO manual: no end-of-travel limit switches — travel ends
-            // at mechanical stops and the stepper stalls.
-            has_end_of_travel_limits: false,
-            // From EMCO manual: no absolute position memory; reference after
-            // every power-on.
-            requires_reference_after_power_on: true,
+            physical: PhysicalConfig::pc_turn_50(),
             link: LinkConfig {
                 // From EMCO schematics: RS-485 on connector X300. The baud is
                 // UNVERIFIED (wire framing not yet characterised); 0 = unknown.
@@ -170,8 +114,16 @@ mod tests {
     #[test]
     fn default_profile_matches_the_manual() {
         let p = MachineProfile::default();
-        assert_eq!((p.x_min_mm, p.x_max_mm), (-0.5, 48.0), "LinuxCNC sim envelope");
-        assert_eq!((p.z_min_mm, p.z_max_mm), (-228.0, 0.5), "LinuxCNC sim envelope");
+        assert_eq!(
+            (p.x_min_mm, p.x_max_mm),
+            (-0.5, 48.0),
+            "LinuxCNC sim envelope"
+        );
+        assert_eq!(
+            (p.z_min_mm, p.z_max_mm),
+            (-228.0, 0.5),
+            "LinuxCNC sim envelope"
+        );
         assert_eq!(DEFAULT_G54_Z_MM, -50.0, "LinuxCNC var parameter 5223");
         assert_eq!(p.rapid_mm_min, 750.0);
         assert_eq!(p.max_feed_mm_min, 750.0);
@@ -181,7 +133,10 @@ mod tests {
         assert_eq!(p.spindle_belt_steps[2].max_rpm, 3000.0);
         assert_eq!(p.threading_max_rpm, 400.0);
         assert_eq!(p.turret_stations, 6, "6 stations, not 8");
-        assert!(!p.has_end_of_travel_limits, "no limit switches on this machine");
+        assert!(
+            !p.has_end_of_travel_limits,
+            "no limit switches on this machine"
+        );
         assert!(p.requires_reference_after_power_on);
         assert_eq!(p.link.kind, LinkKind::Rs485);
         assert_eq!(p.dialect, DialectKind::Emco);
@@ -192,7 +147,10 @@ mod tests {
     fn round_trips_through_camel_case_json() {
         let p = MachineProfile::default();
         let json = serde_json::to_string(&p).unwrap();
-        assert!(json.contains("\"xMinMm\""), "camelCase field names required by contract");
+        assert!(
+            json.contains("\"xMinMm\""),
+            "camelCase field names required by contract"
+        );
         assert!(json.contains("\"resolutionMm\":0.001"));
         assert!(json.contains("\"spindleBeltSteps\""));
         assert!(json.contains("\"minRpm\":130.0") || json.contains("\"minRpm\":130"));

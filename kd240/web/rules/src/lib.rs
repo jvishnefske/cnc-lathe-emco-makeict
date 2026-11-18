@@ -13,6 +13,11 @@
 //! Where the port departs from the Python, on purpose or by necessity, the
 //! item says so under "Port note". In summary:
 //!
+//! * The machine's numbers (the belts, the threading limit, the reference
+//!   point) come from its `PhysicalConfig` (`cnc/model`), through
+//!   [`Machine::from_physical`], instead of constants: the Python keeps
+//!   them as module constants, and every value is the same for the PC
+//!   Turn 50. So the belt and spindle rules are [`Machine`]'s methods.
 //! * A belt is a [`Belt`], which can only hold 1, 2 or 3. Python raises
 //!   `KeyError` when a function is called with another number; here such a
 //!   belt cannot be made ([`Belt::new`] returns `None`).
@@ -42,15 +47,7 @@ use std::collections::BTreeMap;
 // Numbers the INI cannot express
 // -----------------------------------------------------------------------------
 
-/// Belt ranges, rpm: three V-belt positions, moved by hand with the power
-/// off. docs/10-machine-reference.md §4, docs/40-operator-guide.md §6.
-/// \[MANUAL\]
-pub const BELT_RANGES: [(u8, (u32, u32)); 3] =
-    [(1, (130, 1300)), (2, (200, 2000)), (3, (300, 3000))];
-
-/// Threading must stay at or below 400 rpm whatever the belt (doc 40 §6).
-/// \[MANUAL\]
-pub const THREADING_MAX_RPM: u32 = 400;
+pub use cnc_model::PhysicalConfig;
 
 /// A fitted belt position: 1, 2 or 3.
 ///
@@ -62,7 +59,7 @@ pub struct Belt(u8);
 impl Belt {
     /// `None` unless `n` is 1, 2 or 3.
     pub fn new(n: u8) -> Option<Belt> {
-        BELT_RANGES.iter().any(|(b, _)| *b == n).then_some(Belt(n))
+        (1..=3).contains(&n).then_some(Belt(n))
     }
 
     pub fn number(self) -> u8 {
@@ -78,8 +75,9 @@ impl Belt {
 /// Position 2 "covers most work on this machine" (doc 40 §6).
 pub const DEFAULT_BELT: Belt = Belt(2);
 
-/// What the rules need to know about the machine, read from the INI by the
-/// QtVCP handler (and from the machine profile by the web screen).
+/// What the rules need to know about the machine: read from the INI by the
+/// QtVCP handler, and from the machine's `PhysicalConfig` by the web
+/// screen ([`Machine::from_physical`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Machine {
     /// `[JOINT_0]HOME`, radius: the fully retracted X.
@@ -88,6 +86,57 @@ pub struct Machine {
     pub z_park: f64,
     /// `[EMCIO]TOOL_CHANGE_POSITION` is set.
     pub tool_change_retracts: bool,
+    /// The three belt positions, rpm: V-belt positions moved by hand with
+    /// the power off. docs/10-machine-reference.md §4,
+    /// docs/40-operator-guide.md §6. \[MANUAL\]
+    pub belts: [(u32, u32); 3],
+    /// Threading must stay at or below this, whatever the belt (doc 40 §6).
+    /// \[MANUAL\]
+    pub threading_max_rpm: u32,
+}
+
+impl Machine {
+    /// The rules' view of `cfg`: retract and park at its reference point,
+    /// its belts and threading limit. `None` unless it has three belts
+    /// (a [`Belt`] is 1, 2 or 3). `tool_change_retracts` is the
+    /// controller's (LinuxCNC's `TOOL_CHANGE_POSITION`), not the machine's.
+    pub fn from_physical(cfg: &PhysicalConfig, tool_change_retracts: bool) -> Option<Machine> {
+        let b = &cfg.spindle_belt_steps;
+        if b.len() != 3 {
+            return None;
+        }
+        let r = |v: f64| v.round() as u32;
+        Some(Machine {
+            x_retract: cfg.reference.x_mm,
+            z_park: cfg.reference.z_mm,
+            tool_change_retracts,
+            belts: [0, 1, 2].map(|i| (r(b[i].min_rpm), r(b[i].max_rpm))),
+            threading_max_rpm: r(cfg.threading_max_rpm),
+        })
+    }
+
+    /// The PC Turn 50 ([`PhysicalConfig::pc_turn_50`]).
+    pub fn pc_turn_50(tool_change_retracts: bool) -> Machine {
+        Machine::from_physical(&PhysicalConfig::pc_turn_50(), tool_change_retracts)
+            .expect("the PC Turn 50 has three belts")
+    }
+
+    /// `(lo, hi)` rpm for a belt.
+    pub fn belt_range(&self, belt: Belt) -> (u32, u32) {
+        self.belts[usize::from(belt.0) - 1]
+    }
+
+    /// `rpm` limited to what `belt` can turn.
+    pub fn clamp_rpm(&self, belt: Belt, rpm: f64) -> f64 {
+        clamp_rpm_to(self.belt_range(belt), rpm)
+    }
+
+    /// `None` if `rpm` is acceptable on `belt`, else a reason to stop.
+    ///
+    /// `rpm == 0` is a stopped spindle and always acceptable. Negative is M4.
+    pub fn spindle_violation(&self, belt: Belt, rpm: f64, threading: bool) -> Option<String> {
+        spindle_violation_on(self, belt, rpm, threading)
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -170,18 +219,7 @@ impl ReferenceGate {
 // Belt and spindle — doc 40 §6
 // -----------------------------------------------------------------------------
 
-/// `(lo, hi)` rpm for a belt.
-pub fn belt_range(belt: Belt) -> (u32, u32) {
-    BELT_RANGES
-        .iter()
-        .find(|(b, _)| *b == belt.0)
-        .map(|(_, r)| *r)
-        .expect("a Belt is always in BELT_RANGES")
-}
-
-/// `rpm` limited to what `belt` can turn.
-pub fn clamp_rpm(belt: Belt, rpm: f64) -> f64 {
-    let (lo, hi) = belt_range(belt);
+fn clamp_rpm_to((lo, hi): (u32, u32), rpm: f64) -> f64 {
     // Python: max(lo, min(hi, rpm)). Spelled out rather than f64::clamp so a
     // NaN behaves as Python's min/max would (they keep the first argument
     // when a comparison is false): min(hi, nan) is hi, then max(lo, hi) is hi.
@@ -197,22 +235,19 @@ pub fn clamp_rpm(belt: Belt, rpm: f64) -> f64 {
     }
 }
 
-/// `None` if `rpm` is acceptable on `belt`, else a reason to stop.
-///
-/// `rpm == 0` is a stopped spindle and always acceptable. Negative is M4.
-pub fn spindle_violation(belt: Belt, rpm: f64, threading: bool) -> Option<String> {
+fn spindle_violation_on(m: &Machine, belt: Belt, rpm: f64, threading: bool) -> Option<String> {
     let rpm = rpm.abs();
     if rpm == 0.0 {
         return None;
     }
-    if threading && rpm > f64::from(THREADING_MAX_RPM) {
+    if threading && rpm > f64::from(m.threading_max_rpm) {
         return Some(format!(
             "Threading at {} rpm — the limit is {} rpm (doc 40 §6)",
             py::fixed(rpm, 0),
-            THREADING_MAX_RPM
+            m.threading_max_rpm
         ));
     }
-    let (lo, hi) = belt_range(belt);
+    let (lo, hi) = m.belt_range(belt);
     if !(f64::from(lo) <= rpm && rpm <= f64::from(hi)) {
         return Some(format!(
             "{} rpm is outside belt {} ({}–{} rpm) — change the belt or the S word",
@@ -412,7 +447,7 @@ pub fn preflight(text: &str, belt: Belt, machine: &Machine) -> Vec<Finding> {
                                // (line, is_g53, x, z, full X retract value) of the last motion line.
     let mut last_motion: Option<LastMotion> = None;
     let mut in_sub = false;
-    let (lo, hi) = belt_range(belt);
+    let (lo, hi) = machine.belt_range(belt);
 
     for (index, raw) in lines.iter().enumerate() {
         let n = index + 1;
@@ -501,14 +536,16 @@ pub fn preflight(text: &str, belt: Belt, machine: &Machine) -> Vec<Finding> {
 
         // Port note: like the Python, this compares the last S word even
         // under G96, where S is a surface speed rather than rpm.
-        if (has_g(33.0) || has_g(33.1) || has_g(76.0)) && s_active > f64::from(THREADING_MAX_RPM) {
+        if (has_g(33.0) || has_g(33.1) || has_g(76.0))
+            && s_active > f64::from(machine.threading_max_rpm)
+        {
             findings.push(Finding::new(
                 n,
                 Error,
                 format!(
                     "Threading with S{} — the limit is {} rpm",
                     py::g(s_active),
-                    THREADING_MAX_RPM
+                    machine.threading_max_rpm
                 ),
             ));
         }
@@ -796,6 +833,9 @@ mod tests {
 
     #[test]
     fn clamp_handles_nan_like_python() {
-        assert_eq!(clamp_rpm(DEFAULT_BELT, f64::NAN), 2000.0);
+        assert_eq!(
+            Machine::pc_turn_50(false).clamp_rpm(DEFAULT_BELT, f64::NAN),
+            2000.0
+        );
     }
 }

@@ -17,15 +17,16 @@
     # recipe core, and the POSIX node that hosts payloads. Pinned to a
     # commit by flake.lock.
     #
-    # INTERIM: stack/signed-updates is not on GitHub yet, so this is the
-    # sibling checkout's branch, read through git (tracked files only, at
-    # the locked commit). Once it is pushed this becomes
+    # INTERIM: the middleware this needs (stack/posix-node: the posix-node
+    # rename, ABI 8 machine channels and drivers, on stack/signed-updates)
+    # is not on GitHub yet, so this is the sibling worktree's branch, read
+    # through git (tracked files only, at the locked commit). Once it is pushed this becomes
     #   url = "github:jvishnefske/middleware/<rev>";
     # and the local checkout is reached with
     #   nix build … --override-input middleware git+file://$PWD/../middleware
     # (`just dev-middleware` in kd240/justfile).
     middleware = {
-      url = "git+file:///home/j/src/middleware?ref=refs/heads/stack/signed-updates";
+      url = "git+file:///home/j/src/middleware-posix-node?ref=refs/heads/stack/posix-node";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.rust-overlay.follows = "rust-overlay";
     };

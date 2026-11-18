@@ -229,7 +229,10 @@ mod tests {
         let board_key = PublicKey::parse(&text).unwrap();
 
         let env = sign_order(&s, &order()).unwrap();
-        assert_eq!(env.verify(std::slice::from_ref(&board_key)).unwrap(), order());
+        assert_eq!(
+            env.verify(std::slice::from_ref(&board_key)).unwrap(),
+            order()
+        );
         let mut bad = env.clone();
         bad.payload = bad.payload.replace("\"seq\":1", "\"seq\":9");
         assert!(bad.verify(&[board_key]).is_err());

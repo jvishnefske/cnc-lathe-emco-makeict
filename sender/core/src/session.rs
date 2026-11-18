@@ -87,11 +87,23 @@ pub enum Event {
     #[serde(rename_all = "camelCase")]
     Acked { line: i32, at_ms: f64 },
     #[serde(rename_all = "camelCase")]
-    Alarm { code: String, message: String, at_ms: f64 },
+    Alarm {
+        code: String,
+        message: String,
+        at_ms: f64,
+    },
     #[serde(rename_all = "camelCase")]
-    State { from: RunState, to: RunState, at_ms: f64 },
+    State {
+        from: RunState,
+        to: RunState,
+        at_ms: f64,
+    },
     #[serde(rename_all = "camelCase")]
-    Raw { dir: RawDir, bytes: Vec<u8>, at_ms: f64 },
+    Raw {
+        dir: RawDir,
+        bytes: Vec<u8>,
+        at_ms: f64,
+    },
 }
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,13 +129,26 @@ pub enum Command {
     Resume,
     /// Best-effort stop; advisory, never a safety function.
     Abort,
-    SingleBlock { on: bool },
-    DryRun { on: bool },
+    SingleBlock {
+        on: bool,
+    },
+    DryRun {
+        on: bool,
+    },
     #[serde(rename_all = "camelCase")]
-    Jog { axis: Axis, delta_mm: f64, feed_mm_min: f64 },
-    Mdi { text: String },
+    Jog {
+        axis: Axis,
+        delta_mm: f64,
+        feed_mm_min: f64,
+    },
+    Mdi {
+        text: String,
+    },
     #[serde(rename_all = "camelCase")]
-    SetWorkOffset { axis: Axis, value_mm: f64 },
+    SetWorkOffset {
+        axis: Axis,
+        value_mm: f64,
+    },
     Home,
 }
 
@@ -267,7 +292,11 @@ impl Session {
 
         // 2. Received bytes -> dialect events.
         if !rx.is_empty() {
-            out.events.push(Event::Raw { dir: RawDir::Rx, bytes: rx.to_vec(), at_ms: now_ms });
+            out.events.push(Event::Raw {
+                dir: RawDir::Rx,
+                bytes: rx.to_vec(),
+                at_ms: now_ms,
+            });
             for ev in self.dialect.feed_rx(rx) {
                 match ev {
                     DialectEvent::Ack => self.handle_ack(&mut out),
@@ -338,13 +367,20 @@ impl Session {
 
     fn set_run(&mut self, to: RunState, out: &mut StepOut) {
         if self.run != to {
-            out.events.push(Event::State { from: self.run, to, at_ms: self.now_ms });
+            out.events.push(Event::State {
+                from: self.run,
+                to,
+                at_ms: self.now_ms,
+            });
             self.run = to;
         }
     }
 
     fn raise_alarm(&mut self, code: &str, message: &str, out: &mut StepOut) {
-        self.alarms.push(AlarmInfo { code: code.to_string(), message: message.to_string() });
+        self.alarms.push(AlarmInfo {
+            code: code.to_string(),
+            message: message.to_string(),
+        });
         out.events.push(Event::Alarm {
             code: code.to_string(),
             message: message.to_string(),
@@ -354,8 +390,13 @@ impl Session {
     }
 
     fn handle_ack(&mut self, out: &mut StepOut) {
-        let Some(inf) = self.inflight.take() else { return };
-        out.events.push(Event::Acked { line: inf.line, at_ms: self.now_ms });
+        let Some(inf) = self.inflight.take() else {
+            return;
+        };
+        out.events.push(Event::Acked {
+            line: inf.line,
+            at_ms: self.now_ms,
+        });
         if let Some(m) = &inf.motion {
             self.x = m.x1;
             self.z = m.z1;
@@ -433,20 +474,23 @@ impl Session {
             },
             Command::Hold => {
                 if matches!(self.run, RunState::Running | RunState::Toolchange) {
-                    out.tx.extend(self.dialect.control_bytes(ControlAction::FeedHold));
+                    out.tx
+                        .extend(self.dialect.control_bytes(ControlAction::FeedHold));
                     self.set_run(RunState::Hold, out);
                 }
             }
             Command::Resume => {
                 if self.run == RunState::Hold {
-                    out.tx.extend(self.dialect.control_bytes(ControlAction::Resume));
+                    out.tx
+                        .extend(self.dialect.control_bytes(ControlAction::Resume));
                     self.single_block_gate = false;
                     self.set_run(RunState::Running, out);
                 }
             }
             Command::Abort => {
                 // Advisory stop; the real stop is the mains switch at the machine.
-                out.tx.extend(self.dialect.control_bytes(ControlAction::Abort));
+                out.tx
+                    .extend(self.dialect.control_bytes(ControlAction::Abort));
                 self.dialect.reset();
                 self.inflight = None;
                 self.pending.clear();
@@ -467,14 +511,22 @@ impl Session {
                     self.dry_run = on;
                 }
             }
-            Command::Jog { axis, delta_mm, feed_mm_min } => {
+            Command::Jog {
+                axis,
+                delta_mm,
+                feed_mm_min,
+            } => {
                 if self.run == RunState::Idle && self.inflight.is_none() {
                     let feed = feed_mm_min.clamp(1.0, self.profile.max_feed_mm_min);
                     // U/W are incremental regardless of G90/G91; U takes a
                     // diameter value when the machine is in diameter mode.
                     let text = match axis {
                         Axis::X => {
-                            let word = if self.modal.diameter_mode { delta_mm * 2.0 } else { delta_mm };
+                            let word = if self.modal.diameter_mode {
+                                delta_mm * 2.0
+                            } else {
+                                delta_mm
+                            };
                             format!("G94 G1 U{word:.4} F{feed:.1}")
                         }
                         Axis::Z => format!("G94 G1 W{delta_mm:.4} F{feed:.1}"),
@@ -506,7 +558,11 @@ impl Session {
                     let text = match axis {
                         Axis::X => {
                             let off = self.disp_x - value_mm; // machine coord of work X0
-                            let word = if self.modal.diameter_mode { off * 2.0 } else { off };
+                            let word = if self.modal.diameter_mode {
+                                off * 2.0
+                            } else {
+                                off
+                            };
                             format!("G10 L2 P1 X{word:.4}")
                         }
                         Axis::Z => {
@@ -532,8 +588,16 @@ impl Session {
     fn queue_text(&mut self, text: &str, job: JobKind, out: &mut StepOut) -> bool {
         let mut diags = Vec::new();
         match lex_line(text, 0, &mut diags) {
-            Some(b) if diags.iter().all(|d| d.severity != crate::gcode::Severity::Error) => {
-                self.pending.push_back(QueuedBlock { block: b, line: -1, job });
+            Some(b)
+                if diags
+                    .iter()
+                    .all(|d| d.severity != crate::gcode::Severity::Error) =>
+            {
+                self.pending.push_back(QueuedBlock {
+                    block: b,
+                    line: -1,
+                    job,
+                });
                 true
             }
             _ => {
@@ -567,7 +631,11 @@ impl Session {
             if b.words.is_empty() {
                 continue; // e.g. a bare block-skip line
             }
-            return Some(QueuedBlock { line: b.line as i32, block: b, job: JobKind::Program });
+            return Some(QueuedBlock {
+                line: b.line as i32,
+                block: b,
+                job: JobKind::Program,
+            });
         }
         None
     }
@@ -663,9 +731,18 @@ impl Session {
             z0: m.z0,
             x1: m.x1,
             z1: m.z1,
-            cx: match m.kind { MoveKind::Arc { cx, .. } => Some(cx), _ => None },
-            cz: match m.kind { MoveKind::Arc { cz, .. } => Some(cz), _ => None },
-            ccw: match m.kind { MoveKind::Arc { ccw, .. } => Some(ccw), _ => None },
+            cx: match m.kind {
+                MoveKind::Arc { cx, .. } => Some(cx),
+                _ => None,
+            },
+            cz: match m.kind {
+                MoveKind::Arc { cz, .. } => Some(cz),
+                _ => None,
+            },
+            ccw: match m.kind {
+                MoveKind::Arc { ccw, .. } => Some(ccw),
+                _ => None,
+            },
             line: 0,
             feed_mm_min: None,
             tool: None,
@@ -910,7 +987,11 @@ mod tests {
     fn jog_only_when_idle() {
         let mut s = session();
         s.tick(0.0, &[]);
-        s.command(Command::Jog { axis: Axis::Z, delta_mm: -1.0, feed_mm_min: 200.0 });
+        s.command(Command::Jog {
+            axis: Axis::Z,
+            delta_mm: -1.0,
+            feed_mm_min: 200.0,
+        });
         let out = s.tick(1.0, &[]);
         let txt = String::from_utf8_lossy(&out.tx).to_string();
         assert!(txt.contains("W-1.0000"), "{txt}");
@@ -921,7 +1002,11 @@ mod tests {
         s.load_program(&Program::parse("G8 G94 F100\nG1 X5\nM30"));
         s.command(Command::Run);
         s.tick(3.0, &[]);
-        s.command(Command::Jog { axis: Axis::X, delta_mm: 1.0, feed_mm_min: 100.0 });
+        s.command(Command::Jog {
+            axis: Axis::X,
+            delta_mm: 1.0,
+            feed_mm_min: 100.0,
+        });
         let out = s.tick(4.0, &[]);
         assert!(out.tx.is_empty(), "jog while running must be ignored");
     }
@@ -930,17 +1015,26 @@ mod tests {
     fn jog_x_uses_diameter_u_word_in_diameter_mode() {
         let mut s = session();
         s.tick(0.0, &[]);
-        s.command(Command::Jog { axis: Axis::X, delta_mm: 0.5, feed_mm_min: 100.0 });
+        s.command(Command::Jog {
+            axis: Axis::X,
+            delta_mm: 0.5,
+            feed_mm_min: 100.0,
+        });
         let out = s.tick(1.0, &[]);
         let txt = String::from_utf8_lossy(&out.tx).to_string();
-        assert!(txt.contains("U1.0000"), "0.5 mm radius = 1.0 diameter: {txt}");
+        assert!(
+            txt.contains("U1.0000"),
+            "0.5 mm radius = 1.0 diameter: {txt}"
+        );
     }
 
     #[test]
     fn mdi_runs_then_returns_to_idle() {
         let mut s = session();
         s.tick(0.0, &[]);
-        s.command(Command::Mdi { text: "S1000 M3\nG8 G94 G1 X5 F100".to_string() });
+        s.command(Command::Mdi {
+            text: "S1000 M3\nG8 G94 G1 X5 F100".to_string(),
+        });
         let out = s.tick(1.0, &[]);
         assert_eq!(s.state().run, RunState::Running);
         assert_eq!(s.state().current_line, -1, "MDI has no program line");
@@ -955,11 +1049,17 @@ mod tests {
     fn mdi_parse_error_reports_and_does_not_hang() {
         let mut s = session();
         s.tick(0.0, &[]);
-        s.command(Command::Mdi { text: "G1 X".to_string() });
+        s.command(Command::Mdi {
+            text: "G1 X".to_string(),
+        });
         let out = s.tick(1.0, &[]);
         assert!(out.tx.is_empty());
         assert!(out.events.iter().any(|e| matches!(e, Event::Alarm { .. })));
-        assert_eq!(s.state().run, RunState::Idle, "bad MDI must not wedge the session");
+        assert_eq!(
+            s.state().run,
+            RunState::Idle,
+            "bad MDI must not wedge the session"
+        );
     }
 
     #[test]
@@ -976,8 +1076,14 @@ mod tests {
         let st = s.state();
         assert_eq!(st.run, RunState::Idle);
         assert!(st.dro.homed);
-        assert!((st.dro.x_radius_mm - 48.0).abs() < 1e-9, "home = reference at X48");
-        assert!(st.dro.z_mm.abs() < 1e-9, "machine zero is the reference point");
+        assert!(
+            (st.dro.x_radius_mm - 48.0).abs() < 1e-9,
+            "home = reference at X48"
+        );
+        assert!(
+            st.dro.z_mm.abs() < 1e-9,
+            "machine zero is the reference point"
+        );
     }
 
     #[test]
@@ -998,20 +1104,36 @@ mod tests {
         let mut s = session();
         s.tick(0.0, &[]);
         // Default prediction matches the VirtualMachine: G54 Z-50.
-        assert!((s.dro().z_work_mm - 50.0).abs() < 1e-9, "machine 0 reads work +50");
+        assert!(
+            (s.dro().z_work_mm - 50.0).abs() < 1e-9,
+            "machine 0 reads work +50"
+        );
         // Jog to x=2 radius, then touch off X to 0.
-        s.command(Command::Jog { axis: Axis::X, delta_mm: 2.0, feed_mm_min: 100.0 });
+        s.command(Command::Jog {
+            axis: Axis::X,
+            delta_mm: 2.0,
+            feed_mm_min: 100.0,
+        });
         s.tick(1.0, &[]);
         s.tick(2.0, b"ok\r\n");
         assert!((s.dro().x_radius_mm - 2.0).abs() < 1e-9);
-        s.command(Command::SetWorkOffset { axis: Axis::X, value_mm: 0.0 });
+        s.command(Command::SetWorkOffset {
+            axis: Axis::X,
+            value_mm: 0.0,
+        });
         let out = s.tick(3.0, &[]);
         let txt = String::from_utf8_lossy(&out.tx).to_string();
-        assert!(txt.contains("G10 L2 P1 X4.0000"), "diameter-mode offset word: {txt}");
+        assert!(
+            txt.contains("G10 L2 P1 X4.0000"),
+            "diameter-mode offset word: {txt}"
+        );
         s.tick(4.0, b"ok\r\n");
         let d = s.dro();
         assert!((d.x_work_mm - 0.0).abs() < 1e-9);
-        assert!((d.x_radius_mm - 2.0).abs() < 1e-9, "machine coord unchanged");
+        assert!(
+            (d.x_radius_mm - 2.0).abs() < 1e-9,
+            "machine coord unchanged"
+        );
     }
 
     #[test]
@@ -1019,13 +1141,22 @@ mod tests {
         let mut s = session();
         s.tick(0.0, &[]);
         // 10 mm Z move at 600 mm/min = 10 mm/s -> 1 s total.
-        s.command(Command::Mdi { text: "G8 G94 G1 W-10 F600".to_string() });
+        s.command(Command::Mdi {
+            text: "G8 G94 G1 W-10 F600".to_string(),
+        });
         s.tick(0.0, &[]);
         s.tick(500.0, &[]); // halfway, no ack yet
         let d = s.dro();
         // F600 (within the 750 max) -> 10 mm/s -> ~5 mm at 500 ms.
-        assert!(d.z_mm < -2.0 && d.z_mm > -8.0, "should be mid-move, got {}", d.z_mm);
-        assert!(d.z_dtg_mm < -1.0, "distance to go should be negative toward target");
+        assert!(
+            d.z_mm < -2.0 && d.z_mm > -8.0,
+            "should be mid-move, got {}",
+            d.z_mm
+        );
+        assert!(
+            d.z_dtg_mm < -1.0,
+            "distance to go should be negative toward target"
+        );
         s.tick(1500.0, b"ok\r\n");
         assert!((s.dro().z_mm + 10.0).abs() < 1e-9, "snap to target on ack");
         assert_eq!(s.dro().z_dtg_mm, 0.0);
@@ -1080,7 +1211,11 @@ mod tests {
     fn sender_refuses_overtravel_jog() {
         let mut s = session();
         s.tick(0.0, &[]);
-        s.command(Command::Jog { axis: Axis::X, delta_mm: 100.0, feed_mm_min: 100.0 });
+        s.command(Command::Jog {
+            axis: Axis::X,
+            delta_mm: 100.0,
+            feed_mm_min: 100.0,
+        });
         let out = s.tick(1.0, &[]);
         assert!(out.tx.is_empty());
         assert_eq!(s.state().run, RunState::Alarm);

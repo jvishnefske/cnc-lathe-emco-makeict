@@ -1,29 +1,35 @@
 //! `emco-fleet`: the build host's tool (`kd240/fleet/README.md`).
 //!
 //! ```text
+//! emco-fleet pubkey  --pkcs11 emco-fleet          # the card's key, for trustedKeys
 //! emco-fleet keygen  --name emco-fleet-1 --out ~/.config/emco-fleet/fleet.sec
 //! emco-fleet token   --device kd240
-//! emco-fleet publish --device kd240 --toplevel /nix/store/…-nixos-system-kd240-… [--stage]
-//! emco-fleet command --device kd240 switch --toplevel /nix/store/…
-//! emco-fleet command --device kd240 reboot
+//! nix build .#kd240-bundle -o result-bundle
+//! emco-fleet publish --pkcs11 emco-fleet --device kd240 --bundle result-bundle [--stage]
+//! emco-fleet command --pkcs11 emco-fleet --device kd240 reboot --bundle result-bundle
 //! emco-fleet devices
 //! ```
 //!
-//! The secret key is read here and used here. Only signed envelopes leave.
+//! The secret key is used here (or stays in its card). Only signed
+//! envelopes and the bundle's files leave.
 #![forbid(unsafe_code)]
+
+mod bundle_dir;
+mod signing;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use bundle_dir::BundleDir;
 use clap::{Args, Parser, Subcommand};
-use emco_fleet_proto::keys::{Envelope, SecretKey};
+use emco_fleet_proto::keys::{sign_order, Envelope, SecretKey};
 use emco_fleet_proto::msg::{
     Action, Command, DeviceDetail, DeviceSummary, Manifest, Order, Outcome,
 };
-use emco_fleet_proto::policy::{check_toplevel, read_toplevel_facts, system_store_path, Identity};
 use emco_fleet_proto::token::{generate, TokenHash};
 use emco_fleet_proto::{unix_now, valid_name};
+use signing::KeySource;
 
 #[derive(Parser)]
 #[command(
@@ -47,10 +53,33 @@ struct Remote {
 }
 
 #[derive(Args)]
-struct Signing {
-    /// The secret signing key (from `keygen`).
+struct Key {
+    /// The signing key's label in a PKCS#11 token (PKCS11_MODULE,
+    /// PKCS11_TOKEN, PKCS11_PIN as for mwctl).
+    #[arg(long, env = "FLEET_PKCS11_KEY")]
+    pkcs11: Option<String>,
+    /// A software ed25519 key from `keygen`, instead of a token.
     #[arg(long, env = "FLEET_KEY_FILE")]
-    key: PathBuf,
+    key: Option<PathBuf>,
+    /// The name the board's trusted key has. Default: the PKCS#11 label.
+    #[arg(long, env = "FLEET_KEY_NAME")]
+    key_name: Option<String>,
+}
+
+impl Key {
+    fn source(&self) -> R<KeySource> {
+        KeySource::from_args(
+            self.key.as_deref(),
+            self.pkcs11.as_deref(),
+            self.key_name.as_deref(),
+        )
+    }
+}
+
+#[derive(Args)]
+struct Signing {
+    #[command(flatten)]
+    key: Key,
     #[arg(long)]
     device: String,
     /// Sequence number. Default: the time in milliseconds, which only grows.
@@ -70,46 +99,44 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
-    /// Print the public key of a secret key file.
+    /// Print the public key for the board's trustedKeys.
     Pubkey {
-        #[arg(long, env = "FLEET_KEY_FILE")]
-        key: PathBuf,
+        #[command(flatten)]
+        key: Key,
     },
     /// Make a device token: the token for the board, a line for the server.
     Token {
         #[arg(long)]
         device: String,
     },
-    /// Sign and publish a manifest for a built toplevel.
+    /// Upload a built bundle's files and publish a signed manifest for it.
     Publish {
         #[command(flatten)]
         sign: Signing,
         #[command(flatten)]
         remote: Remote,
-        /// The built system, `/nix/store/…-nixos-system-<host>-…` (must exist here).
+        /// The bundle directory (`nix build .#kd240-bundle`).
         #[arg(long)]
-        toplevel: PathBuf,
-        /// Also stage it on the board (next boot) once fetched.
+        bundle: PathBuf,
+        /// Also write it into the board's inactive slot now.
         #[arg(long)]
         stage: bool,
         #[arg(long, default_value = "")]
         note: String,
     },
-    /// Sign and send a command: stage, switch or reboot.
+    /// Sign and send a command: stage, or reboot (into a bundle, or not).
     Command {
         #[command(flatten)]
         sign: Signing,
         #[command(flatten)]
         remote: Remote,
-        #[arg(value_parser = ["stage", "switch", "reboot"])]
+        #[arg(value_parser = ["stage", "reboot"])]
         action: String,
-        /// The toplevel (stage, switch; optional for reboot: stage it first).
+        /// The bundle directory (stage; optional for reboot: boot it once,
+        /// committed when healthy).
         #[arg(long)]
-        toplevel: Option<PathBuf>,
-        /// The host name the toplevel is for, when it is not in the local store.
-        #[arg(long)]
-        host: Option<String>,
-        /// Seconds the command stays valid (a deferred switch expires).
+        bundle: Option<PathBuf>,
+        /// Seconds the command stays valid (a deferred reboot expires).
         #[arg(long, default_value_t = 3600)]
         ttl_s: u64,
     },
@@ -185,6 +212,32 @@ impl Client {
         }
     }
 
+    /// Upload the bundle's files the server does not have yet.
+    fn upload(&self, b: &BundleDir) -> R<()> {
+        let auth = format!("Bearer {}", self.token);
+        for f in &b.bundle.files {
+            let url = self.url(&format!("/api/v1/files/{}", f.sha256));
+            let p = b.path(&f.name);
+            let file = std::fs::File::open(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+            let resp = self
+                .http
+                .put(&url)
+                .config()
+                .timeout_global(None)
+                .build()
+                .header("Authorization", &auth)
+                .header("Content-Type", "application/octet-stream")
+                .send(&file)
+                .map_err(|e| format!("{url}: {e}"))?;
+            let fresh = resp.status() == 201;
+            self.check(&format!("PUT {url}"), resp)?;
+            if fresh {
+                eprintln!("emco-fleet: uploaded {} ({} bytes)", f.name, f.size);
+            }
+        }
+        Ok(())
+    }
+
     fn send(&self, method: &str, path: &str, env: Option<&Envelope>) -> R<String> {
         let url = self.url(path);
         let auth = format!("Bearer {}", self.token);
@@ -208,10 +261,6 @@ impl Client {
     }
 }
 
-fn load_key(p: &Path) -> R<SecretKey> {
-    SecretKey::parse(&read_trim(p)?).map_err(|e| format!("{}: {e}", p.display()))
-}
-
 fn seq_or_now(seq: Option<u64>) -> u64 {
     seq.unwrap_or_else(|| {
         std::time::SystemTime::now()
@@ -221,27 +270,24 @@ fn seq_or_now(seq: Option<u64>) -> u64 {
     })
 }
 
-/// The toplevel as the board will check it, here first.
-fn local_toplevel(device: &str, toplevel: &Path) -> R<(String, Identity)> {
-    let path = std::fs::canonicalize(toplevel)
-        .map_err(|e| format!("{}: {e} (build it first)", toplevel.display()))?;
-    let path_s = path.to_string_lossy().into_owned();
-    let facts = read_toplevel_facts(&path);
-    let host = facts
-        .hostname
-        .clone()
-        .ok_or_else(|| format!("{path_s} has no etc/hostname: not a NixOS system?"))?;
-    let system = facts
-        .system
-        .clone()
-        .ok_or_else(|| format!("{path_s} has no `system` file: not a NixOS system?"))?;
-    let me = Identity {
-        device: device.to_string(),
-        host,
-        system,
-    };
-    check_toplevel(&path_s, &facts, &me)?;
-    Ok((path_s, me))
+fn sign_env(sign: &Signing, order: &Order) -> R<Envelope> {
+    let signer = sign.key.source()?.open()?;
+    sign_order(signer.as_ref(), order)
+}
+
+/// Open a bundle directory and upload its files (unless only printing).
+fn prepare(sign: &Signing, remote: &Remote, dir: &Path) -> R<BundleDir> {
+    let b = BundleDir::open(dir)?;
+    if b.bundle.class != "kd240" {
+        eprintln!(
+            "emco-fleet: note: the bundle is for class {:?}",
+            b.bundle.class
+        );
+    }
+    if !sign.print {
+        remote.client()?.upload(&b)?;
+    }
+    Ok(b)
 }
 
 fn deliver(sign: &Signing, remote: &Remote, env: Envelope, method: &str, what: &str) -> R<()> {
@@ -324,14 +370,26 @@ fn print_summary(s: &DeviceSummary, now: u64) {
     );
     println!("  lathe      {}", clean(&t.run_state));
     println!("  current    {}", short(&t.current_system));
-    if t.booted_system != t.current_system {
-        println!("  booted     {}", short(&t.booted_system));
-    }
-    if t.profile_system != t.current_system {
-        println!("  next boot  {}", short(&t.profile_system));
-    }
-    if t.available_system.is_some() && t.available_system != t.current_system {
-        println!("  available  {}", short(&t.available_system));
+    if let Some(sl) = &t.slots {
+        let o = |s: &Option<String>| clean(s.as_deref().unwrap_or("?"));
+        println!(
+            "  slots      booted {}  committed {}{}",
+            o(&sl.booted),
+            o(&sl.active),
+            sl.try_slot
+                .as_ref()
+                .map(|t| format!("  TRY {}", clean(t)))
+                .unwrap_or_default()
+        );
+        println!("  slot a     {}", short(&sl.a));
+        println!("  slot b     {}", short(&sl.b));
+        if sl.available.is_some() {
+            println!(
+                "  available  {}{}",
+                short(&sl.available),
+                if sl.staged { " (staged)" } else { "" }
+            );
+        }
     }
     println!(
         "  kernel     {} {}",
@@ -402,7 +460,16 @@ fn run(cli: Cli) -> R<()> {
             eprintln!("emco-fleet: public key for services.emco-fleet-agent.trustedKeys:");
             println!("{}", k.public().to_text());
         }
-        Cmd::Pubkey { key } => println!("{}", load_key(&key)?.public().to_text()),
+        Cmd::Pubkey { key } => {
+            let s = key.source()?.open()?;
+            let pk = s.public_key()?;
+            eprintln!(
+                "emco-fleet: {} key, fingerprint {}",
+                pk.algorithm(),
+                pk.fingerprint()
+            );
+            println!("{}", pk.to_text());
+        }
         Cmd::Token { device } => {
             if !valid_name(&device) {
                 return Err(format!("bad device id {device:?}"));
@@ -418,50 +485,36 @@ fn run(cli: Cli) -> R<()> {
         Cmd::Publish {
             sign,
             remote,
-            toplevel,
+            bundle,
             stage,
             note,
         } => {
-            let key = load_key(&sign.key)?;
-            let (toplevel, me) = local_toplevel(&sign.device, &toplevel)?;
+            let b = prepare(&sign, &remote, &bundle)?;
             let order = Order::Manifest(Manifest {
                 device: sign.device.clone(),
                 seq: seq_or_now(sign.seq),
-                host: me.host,
-                system: me.system,
-                toplevel,
+                bundle: b.bundle,
                 stage,
                 created: unix_now(),
                 note,
             });
-            deliver(&sign, &remote, key.sign(&order), "PUT", "manifest")?;
+            deliver(&sign, &remote, sign_env(&sign, &order)?, "PUT", "manifest")?;
         }
         Cmd::Command {
             sign,
             remote,
             action,
-            toplevel,
-            host,
+            bundle,
             ttl_s,
         } => {
-            let key = load_key(&sign.key)?;
-            let top = match &toplevel {
-                Some(t) if t.exists() => Some(local_toplevel(&sign.device, t)?.0),
-                Some(t) => {
-                    let t = t.to_string_lossy().into_owned();
-                    let host = host
-                        .as_deref()
-                        .ok_or("the toplevel is not in the local store: give --host")?;
-                    system_store_path(&t, host)?;
-                    Some(t)
-                }
+            let b = match &bundle {
+                Some(dir) => Some(prepare(&sign, &remote, dir)?.bundle),
                 None => None,
             };
-            let action = match (action.as_str(), top) {
-                ("stage", Some(toplevel)) => Action::Stage { toplevel },
-                ("switch", Some(toplevel)) => Action::Switch { toplevel },
-                ("reboot", toplevel) => Action::Reboot { toplevel },
-                (a, None) => return Err(format!("{a} needs --toplevel")),
+            let action = match (action.as_str(), b) {
+                ("stage", Some(bundle)) => Action::Stage { bundle },
+                ("reboot", bundle) => Action::Reboot { bundle },
+                (a, None) => return Err(format!("{a} needs --bundle")),
                 _ => unreachable!(),
             };
             let order = Order::Command(Command {
@@ -470,7 +523,7 @@ fn run(cli: Cli) -> R<()> {
                 not_after: unix_now() + ttl_s,
                 action,
             });
-            deliver(&sign, &remote, key.sign(&order), "POST", "commands")?;
+            deliver(&sign, &remote, sign_env(&sign, &order)?, "POST", "commands")?;
         }
         Cmd::Cancel { remote, device } => {
             remote.client()?.send(

@@ -13,7 +13,7 @@ use emco_fleet_proto::policy::Identity;
 #[command(
     name = "emco-fleet-agent",
     version,
-    about = "KD240 fleet agent: telemetry and owner-signed NixOS updates"
+    about = "KD240 fleet agent: telemetry and owner-signed A/B updates"
 )]
 struct Args {
     /// The fleet server, `https://…`.
@@ -33,12 +33,16 @@ struct Args {
         required = true
     )]
     trusted_keys: Vec<String>,
-    /// The NixOS host name toplevels must be for. Default: this machine's.
-    #[arg(long)]
-    host: Option<String>,
-    /// The Nix system toplevels must be for.
-    #[arg(long, default_value_t = format!("{}-linux", std::env::consts::ARCH))]
-    system: String,
+    /// The device class bundles must be built for.
+    #[arg(long, env = "FLEET_CLASS", default_value = "kd240")]
+    class: String,
+    /// The SD card's MBR disk id, lowercase hex: the slots are
+    /// `/dev/disk/by-partuuid/<id>-02` (a) and `-03` (b).
+    #[arg(long, env = "FLEET_DISK_ID")]
+    disk_id: String,
+    /// Where the FAT boot partition (KD240BOOT) is mounted.
+    #[arg(long, env = "FLEET_BOOT_DIR", default_value = "/boot")]
+    boot_dir: PathBuf,
     #[arg(long, default_value = "/var/lib/emco-fleet-agent")]
     state_dir: PathBuf,
     /// The lathe service's state endpoint (read only).
@@ -69,26 +73,35 @@ fn setup(a: &Args) -> Result<Agent<RealSystem>, String> {
         .filter(|k| !k.is_empty())
         .map(|k| PublicKey::parse(k))
         .collect::<Result<Vec<_>, _>>()?;
-    let host = match &a.host {
-        Some(h) => h.clone(),
-        None => std::fs::read_to_string("/proc/sys/kernel/hostname")
-            .map_err(|e| format!("host name: {e}"))?
-            .trim()
-            .to_string(),
-    };
+    let disk_id = a
+        .disk_id
+        .trim()
+        .trim_start_matches("0x")
+        .to_ascii_lowercase();
+    if disk_id.is_empty() || disk_id.len() > 8 || !disk_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!(
+            "bad --disk-id {:?}: an MBR id, 8 hex digits",
+            a.disk_id
+        ));
+    }
     let cfg = Config {
         server: a.server.clone(),
         identity: Identity {
             device: a.device.clone(),
-            host,
-            system: a.system.clone(),
+            class: a.class.clone(),
         },
         token,
         trusted,
         state_dir: a.state_dir.clone(),
         local_state_url: a.local_state_url.clone(),
     };
-    Agent::new(cfg, RealSystem)
+    Agent::new(
+        cfg,
+        RealSystem {
+            disk_id,
+            boot_dir: a.boot_dir.clone(),
+        },
+    )
 }
 
 fn main() {

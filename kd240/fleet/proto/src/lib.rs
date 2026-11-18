@@ -1,18 +1,23 @@
 //! The KD240 fleet protocol, shared by the server, the board agent and the
 //! build host's CLI.
 //!
-//! * [`keys`]: ed25519 keys and the signed [`Envelope`](keys::Envelope).
-//!   Every update manifest and every command is signed offline on the build
-//!   host; the server only stores and relays envelopes.
+//! * [`keys`]: P-256 (the owner's smart card) and ed25519 keys, and the
+//!   signed [`Envelope`](keys::Envelope). Every update manifest and every
+//!   command is signed offline on the build host; the server only stores
+//!   and relays envelopes.
+//! * [`bundle`]: what one A/B slot holds (`bundle.json`).
+//! * [`bootstate`]: the A/B boot state U-Boot and Linux share.
 //! * [`msg`]: what is signed ([`Order`](msg::Order)) and what goes over the
 //!   wire unsigned (polls, telemetry, results).
 //! * [`policy`]: the board's decisions as pure functions: which orders it
 //!   accepts, when it may switch or reboot (only with the lathe service
-//!   idle or disconnected), what a toplevel must look like, and how the
-//!   previous generation is kept.
+//!   idle or disconnected), which slot it may write, and how a trial boot
+//!   is committed or rolled back.
 //! * [`token`]: bearer tokens, compared in constant time.
 #![forbid(unsafe_code)]
 
+pub mod bootstate;
+pub mod bundle;
 pub mod keys;
 pub mod msg;
 pub mod policy;

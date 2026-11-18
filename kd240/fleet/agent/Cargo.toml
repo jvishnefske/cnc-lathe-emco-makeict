@@ -15,6 +15,9 @@ serde.workspace = true
 serde_json.workspace = true
 clap.workspace = true
 ureq.workspace = true
+sha2 = "0.10"
+# fadvise(DONTNEED), so a slot is read back from the card, not the page cache.
+rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
 emco-fleet-server.workspace = true

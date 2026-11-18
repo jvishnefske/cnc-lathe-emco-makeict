@@ -1,48 +1,60 @@
 //! Everything the agent does to the system goes through [`System`], so the
-//! tests run against a fake and never run Nix or reboot anything.
+//! tests run against a fake and never touch a disk or reboot anything.
 //!
-//! [`RealSystem`] runs exactly four programs, and the agent's tests check
-//! this file for any other (`lib.rs`, `executor_runs_only_the_allowed_programs`):
+//! [`RealSystem`] writes exactly these, and the agent's tests check this
+//! file for anything else (`lib.rs`, `executor_touches_only_the_slots`):
 //!
-//! * `nix-store --realise <toplevel>`: substitute the closure from the
-//!   binary caches the board trusts (Nix checks their signatures)
-//! * `nix-env -p /nix/var/nix/profiles/system --set <toplevel>`: a new
-//!   system profile generation (older ones stay)
-//! * `systemd-run … <toplevel>/bin/switch-to-configuration boot|switch`:
-//!   write the boot entry on the root partition's /boot, and with `switch`
-//!   activate; run as its own transient unit, as nixos-rebuild does, so a
-//!   restart of this agent's unit cannot cut it short
-//! * `systemctl reboot`
+//! * the inactive slot's raw partition, `/dev/disk/by-partuuid/<id>-02`
+//!   (slot a) or `-03` (slot b), from its first byte;
+//! * the inactive slot's directory on the FAT boot partition,
+//!   `<boot>/a/` or `<boot>/b/` (`Image`, `initrd`, `dtb`, `cmdline`);
+//! * the two boot-state sectors in the gap before partition 1
+//!   (`emco_fleet_proto::bootstate::COPY_LBA`), on the disk those
+//!   partitions belong to;
 //!
-//! It never touches the boot firmware, its saved environment, or the
-//! card's first (FAT) partition.
+//! and it runs one program, `systemctl` (`reboot`, and `list-units` for
+//! telemetry). It never touches the QSPI boot firmware or its saved
+//! environment, the partition table, the boot partition's `boot.scr`, or
+//! the persistent data partition. Which slot it writes is the agent's
+//! decision, made by `emco_fleet_proto::policy::stage_target`.
 
-use std::path::Path;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use emco_fleet_proto::bootstate::{Slot, COPY_LBA, SECTOR};
+use emco_fleet_proto::bundle::FILES;
 use emco_fleet_proto::msg::{Telemetry, Temp};
-use emco_fleet_proto::policy::{read_toplevel_facts, Generation, ToplevelFacts};
 
 use crate::telemetry::*;
 
-pub const SYSTEM_PROFILE: &str = "/nix/var/nix/profiles/system";
-const PROFILES_DIR: &str = "/nix/var/nix/profiles";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Activation {
-    /// Boot entry only; takes effect at the next boot.
-    Boot,
-    /// Boot entry and activate now.
-    Switch,
+/// Where one bundle file goes.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Dest {
+    pub slot: Slot,
+    /// One of `emco_fleet_proto::bundle::FILES`.
+    pub file: &'static str,
 }
 
-impl Activation {
-    pub fn arg(self) -> &'static str {
-        match self {
-            Activation::Boot => "boot",
-            Activation::Switch => "switch",
-        }
+impl Dest {
+    pub fn new(slot: Slot, name: &str) -> Option<Dest> {
+        FILES
+            .iter()
+            .find(|f| **f == name)
+            .map(|file| Dest { slot, file })
     }
+
+    pub fn is_rootfs(&self) -> bool {
+        self.file == FILES[0]
+    }
+}
+
+/// A slot file being written. `finish` makes it durable (and, for a boot
+/// file, gives it its name). Dropping it unfinished leaves junk in the
+/// inactive slot, which is never booted unless marked.
+pub trait SlotWriter: Write {
+    fn finish(self: Box<Self>) -> Result<(), String>;
 }
 
 pub trait System {
@@ -50,22 +62,33 @@ pub trait System {
     fn now(&self) -> u64;
     /// Host facts for telemetry. The agent adds its own fields.
     fn host_telemetry(&self) -> Telemetry;
-    /// `/run/current-system`'s store path.
+    /// `/run/current-system`'s store path: the running release's version.
     fn current_system(&self) -> Option<String>;
-    /// The system profile's generations.
-    fn generations(&self) -> Result<Vec<Generation>, String>;
-    /// Fetch the closure into the store.
-    fn realise(&self, toplevel: &str) -> Result<(), String>;
-    fn toplevel_facts(&self, toplevel: &str) -> ToplevelFacts;
-    /// A new system profile generation pointing at `toplevel`.
-    fn set_profile(&self, toplevel: &str) -> Result<(), String>;
-    /// `<toplevel>/bin/switch-to-configuration boot|switch`.
-    fn activate(&self, toplevel: &str, how: Activation) -> Result<(), String>;
+    /// The slot this boot came from (`emco.slot=` on the kernel command line).
+    fn booted_slot(&self) -> Option<Slot>;
+    /// The two boot-state sectors, as they are on the card.
+    fn read_bootstate(&self) -> Result<[Vec<u8>; 2], String>;
+    /// Write one boot-state copy and flush it to the card.
+    fn write_bootstate(&self, copy: usize, sector: &[u8; SECTOR]) -> Result<(), String>;
+    /// How many bytes `dest` can hold.
+    fn capacity(&self, dest: &Dest) -> Result<u64, String>;
+    fn open_write(&self, dest: &Dest) -> Result<Box<dyn SlotWriter>, String>;
+    /// Read back the first `len` bytes of `dest` from the card itself (not
+    /// from the page cache).
+    fn open_read(&self, dest: &Dest, len: u64) -> Result<Box<dyn Read>, String>;
+    /// Make a slot unbootable: wipe the root file system's superblock and
+    /// remove its boot files.
+    fn invalidate(&self, slot: Slot) -> Result<(), String>;
     fn reboot(&self) -> Result<(), String>;
 }
 
 /// The board.
-pub struct RealSystem;
+pub struct RealSystem {
+    /// The card's MBR disk id, lowercase hex (`/dev/disk/by-partuuid/<id>-0N`).
+    pub disk_id: String,
+    /// Where the FAT boot partition (KD240BOOT) is mounted.
+    pub boot_dir: PathBuf,
+}
 
 fn read(path: impl AsRef<Path>) -> Option<String> {
     std::fs::read_to_string(path).ok()
@@ -89,6 +112,111 @@ fn run(cmd: &mut Command) -> Result<String, String> {
             .find(|&i| err.is_char_boundary(i))
             .unwrap_or(err.len());
         Err(format!("{shown}: {}: {}", out.status, err[tail..].trim()))
+    }
+}
+
+fn e(path: &Path) -> impl Fn(std::io::Error) -> String + '_ {
+    move |err| format!("{}: {err}", path.display())
+}
+
+/// Drop `path`'s cached pages, so the next read comes from the card.
+fn drop_cache(f: &File, path: &Path) -> Result<(), String> {
+    rustix::fs::fadvise(f, 0, None, rustix::fs::Advice::DontNeed)
+        .map_err(|err| format!("{}: fadvise: {err}", path.display()))
+}
+
+impl RealSystem {
+    fn partition(&self, n: u8) -> PathBuf {
+        PathBuf::from(format!("/dev/disk/by-partuuid/{}-{n:02}", self.disk_id))
+    }
+
+    fn rootfs(&self, slot: Slot) -> PathBuf {
+        self.partition(match slot {
+            Slot::A => 2,
+            Slot::B => 3,
+        })
+    }
+
+    fn boot_file(&self, dest: &Dest) -> PathBuf {
+        self.boot_dir.join(dest.slot.as_str()).join(dest.file)
+    }
+
+    fn path(&self, dest: &Dest) -> PathBuf {
+        if dest.is_rootfs() {
+            self.rootfs(dest.slot)
+        } else {
+            self.boot_file(dest)
+        }
+    }
+
+    /// The whole disk partition 1 is on: `/dev/sda1` → `/dev/sda`, through
+    /// sysfs (`/sys/class/block/sda1/..`).
+    fn disk(&self) -> Result<PathBuf, String> {
+        let p1 = self.partition(1);
+        let dev = std::fs::canonicalize(&p1).map_err(e(&p1))?;
+        let name = dev
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| format!("{}: no device name", dev.display()))?;
+        let sys = PathBuf::from(format!("/sys/class/block/{name}"));
+        let real = std::fs::canonicalize(&sys).map_err(e(&sys))?;
+        if !real.join("partition").exists() {
+            return Err(format!("{} is not a partition", dev.display()));
+        }
+        let parent = real
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| format!("{}: no parent disk", real.display()))?;
+        Ok(PathBuf::from(format!("/dev/{parent}")))
+    }
+}
+
+struct RawWriter {
+    file: File,
+    path: PathBuf,
+}
+
+impl Write for RawWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.file.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+impl SlotWriter for RawWriter {
+    fn finish(self: Box<Self>) -> Result<(), String> {
+        self.file.sync_all().map_err(e(&self.path))?;
+        drop_cache(&self.file, &self.path)
+    }
+}
+
+/// A boot file, written as `<name>.part` and renamed once synced.
+struct FileWriter {
+    file: File,
+    tmp: PathBuf,
+    path: PathBuf,
+}
+
+impl Write for FileWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.file.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+impl SlotWriter for FileWriter {
+    fn finish(self: Box<Self>) -> Result<(), String> {
+        self.file.sync_all().map_err(e(&self.tmp))?;
+        std::fs::rename(&self.tmp, &self.path).map_err(e(&self.path))?;
+        if let Some(dir) = self.path.parent() {
+            File::open(dir).and_then(|d| d.sync_all()).map_err(e(dir))?;
+        }
+        drop_cache(&self.file, &self.path)
     }
 }
 
@@ -187,9 +315,7 @@ impl System for RealSystem {
                 read("/proc/sys/kernel/hostname").unwrap_or_default().trim(),
                 64,
             ),
-            current_system: store_target("/run/current-system"),
-            booted_system: store_target("/run/booted-system"),
-            profile_system: store_target(SYSTEM_PROFILE),
+            current_system: self.current_system(),
             kernel_release: clip(
                 read("/proc/sys/kernel/osrelease")
                     .unwrap_or_default()
@@ -218,68 +344,89 @@ impl System for RealSystem {
         store_target("/run/current-system")
     }
 
-    fn generations(&self) -> Result<Vec<Generation>, String> {
-        let now = std::time::SystemTime::now();
-        let mut out = Vec::new();
-        for e in std::fs::read_dir(PROFILES_DIR)
-            .map_err(|e| format!("{PROFILES_DIR}: {e}"))?
-            .flatten()
-        {
-            let name = e.file_name().to_string_lossy().into_owned();
-            let Some(n) = name
-                .strip_prefix("system-")
-                .and_then(|r| r.strip_suffix("-link"))
-                .and_then(|n| n.parse().ok())
-            else {
-                continue;
-            };
-            let Ok(target) = std::fs::read_link(e.path()) else {
-                continue;
-            };
-            let age_s = e
-                .path()
-                .symlink_metadata()
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| now.duration_since(t).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(u64::MAX);
-            out.push(Generation {
-                number: n,
-                target: target.to_string_lossy().into_owned(),
-                age_s,
-            });
+    fn booted_slot(&self) -> Option<Slot> {
+        read("/proc/cmdline").and_then(|c| Slot::from_cmdline(&c))
+    }
+
+    fn read_bootstate(&self) -> Result<[Vec<u8>; 2], String> {
+        let disk = self.disk()?;
+        let mut f = File::open(&disk).map_err(e(&disk))?;
+        drop_cache(&f, &disk)?;
+        let mut out = [vec![0u8; SECTOR], vec![0u8; SECTOR]];
+        for (lba, buf) in COPY_LBA.iter().zip(out.iter_mut()) {
+            f.seek(SeekFrom::Start(lba * SECTOR as u64))
+                .and_then(|_| f.read_exact(buf))
+                .map_err(e(&disk))?;
         }
         Ok(out)
     }
 
-    fn realise(&self, toplevel: &str) -> Result<(), String> {
-        run(Command::new("nix-store").args(["--realise", toplevel])).map(drop)
+    fn write_bootstate(&self, copy: usize, sector: &[u8; SECTOR]) -> Result<(), String> {
+        let disk = self.disk()?;
+        let lba = *COPY_LBA.get(copy).ok_or("no such boot-state copy")?;
+        let mut f = OpenOptions::new()
+            .write(true)
+            .open(&disk)
+            .map_err(e(&disk))?;
+        f.seek(SeekFrom::Start(lba * SECTOR as u64))
+            .and_then(|_| f.write_all(sector))
+            .and_then(|_| f.sync_all())
+            .map_err(e(&disk))
     }
 
-    fn toplevel_facts(&self, toplevel: &str) -> ToplevelFacts {
-        read_toplevel_facts(Path::new(toplevel))
+    fn capacity(&self, dest: &Dest) -> Result<u64, String> {
+        if !dest.is_rootfs() {
+            // FAT space shows itself as a failed write.
+            return Ok(u64::MAX);
+        }
+        let p = self.rootfs(dest.slot);
+        File::open(&p)
+            .and_then(|mut f| f.seek(SeekFrom::End(0)))
+            .map_err(e(&p))
     }
 
-    fn set_profile(&self, toplevel: &str) -> Result<(), String> {
-        run(Command::new("nix-env").args(["-p", SYSTEM_PROFILE, "--set", toplevel])).map(drop)
+    fn open_write(&self, dest: &Dest) -> Result<Box<dyn SlotWriter>, String> {
+        if dest.is_rootfs() {
+            let path = self.rootfs(dest.slot);
+            let file = OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .map_err(e(&path))?;
+            return Ok(Box::new(RawWriter { file, path }));
+        }
+        let path = self.boot_file(dest);
+        let dir = path.parent().expect("a boot file has a directory");
+        std::fs::create_dir_all(dir).map_err(e(dir))?;
+        let tmp = path.with_extension("part");
+        let file = File::create(&tmp).map_err(e(&tmp))?;
+        Ok(Box::new(FileWriter { file, tmp, path }))
     }
 
-    fn activate(&self, toplevel: &str, how: Activation) -> Result<(), String> {
-        let stc = format!("{toplevel}/bin/switch-to-configuration");
-        run(Command::new("systemd-run").args([
-            "--unit=emco-fleet-activate",
-            "--collect",
-            "--no-ask-password",
-            "--wait",
-            "--pipe",
-            "--quiet",
-            "--service-type=exec",
-            "--",
-            &stc,
-            how.arg(),
-        ]))
-        .map(drop)
+    fn open_read(&self, dest: &Dest, len: u64) -> Result<Box<dyn Read>, String> {
+        let path = self.path(dest);
+        let f = File::open(&path).map_err(e(&path))?;
+        drop_cache(&f, &path)?;
+        Ok(Box::new(f.take(len)))
+    }
+
+    fn invalidate(&self, slot: Slot) -> Result<(), String> {
+        let path = self.rootfs(slot);
+        let mut f = OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .map_err(e(&path))?;
+        f.write_all(&vec![0u8; 1 << 20])
+            .and_then(|_| f.sync_all())
+            .map_err(e(&path))?;
+        for name in &FILES[1..] {
+            let p = self.boot_file(&Dest { slot, file: name });
+            match std::fs::remove_file(&p) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(format!("{}: {err}", p.display())),
+            }
+        }
+        Ok(())
     }
 
     fn reboot(&self) -> Result<(), String> {

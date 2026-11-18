@@ -2,16 +2,21 @@
 //!
 //! Each run (a systemd timer, `--once`) it:
 //!
-//! 1. gathers telemetry and POSTs it to the server's poll endpoint, with the
+//! 1. settles the boot ([`Agent::settle_boot`]): a trial boot of a new slot
+//!    commits itself once the lathe service answers, and the outcome of the
+//!    last trial (committed, or rolled back by U-Boot) is reported;
+//! 2. gathers telemetry and POSTs it to the server's poll endpoint, with the
 //!    last sequence number it accepted;
-//! 2. verifies every signed order in the answer against the owner's public
-//!    keys, then its device id, sequence number, expiry and toplevel
+//! 3. verifies every signed order in the answer against the owner's public
+//!    keys (middleware's verifier, `emco_fleet_proto::keys`), then its device
+//!    id, sequence number, expiry and bundle
 //!    ([`emco_fleet_proto::policy::accept_order`]);
-//! 3. carries them out in sequence order through [`System`], with the
-//!    lathe-service interlock in front of switch and reboot
-//!    ([`emco_fleet_proto::policy::interlock`]), asked once when the order is
-//!    taken up and again immediately before the act;
-//! 4. reports the results.
+//! 4. carries them out in sequence order through [`System`]: staging writes
+//!    the bundle's files into the inactive A/B slot and reads them back;
+//!    a reboot is behind the lathe-service interlock
+//!    ([`emco_fleet_proto::policy::interlock`]), asked once when the order
+//!    is taken up and again immediately before the act;
+//! 5. reports the results.
 //!
 //! A deferred order is reported and left for the next poll, and nothing
 //! after it runs first. The only things it reads from the lathe service are
@@ -22,22 +27,28 @@ pub mod system;
 pub mod telemetry;
 
 use std::collections::VecDeque;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use emco_fleet_proto::keys::{Envelope, PublicKey};
+use emco_fleet_proto::bootstate::{self, BootState, Slot};
+use emco_fleet_proto::bundle::{Bundle, BundleFile};
+use emco_fleet_proto::keys::{hex, Envelope, PublicKey};
 use emco_fleet_proto::msg::{
-    Action, ActionResult, Command, Manifest, Order, Outcome, PollRequest, PollResponse, Telemetry,
+    Action, ActionResult, Command, Manifest, Order, Outcome, PollRequest, PollResponse, Slots,
+    Telemetry,
 };
 use emco_fleet_proto::policy::{
-    accept_order, check_toplevel, interlock, plan_profile, run_state_from_api, Gate, Identity,
-    RunState, Step, KEEP_MAX_AGE_S, MENU_GENERATIONS,
+    accept_order, interlock, is_trial_boot, on_boot, run_state_from_api, stage_target, trial,
+    trial_outcome, Gate, Identity, RunState, Step, TrialOutcome,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
-pub use system::{Activation, RealSystem, System};
+pub use system::{Dest, RealSystem, SlotWriter, System};
 
 const KEEP_RESULTS: usize = 10;
+const CHUNK: usize = 1 << 16;
 
 pub struct Config {
     /// `https://fleet.example.com` (no trailing path).
@@ -51,15 +62,63 @@ pub struct Config {
     pub local_state_url: String,
 }
 
+/// What one slot holds, as far as this agent wrote and checked it.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SlotContent {
+    /// [`Bundle::digest`].
+    pub digest: String,
+    /// [`Bundle::version`].
+    pub version: String,
+}
+
+/// A reboot into a slot whose outcome is not known yet.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct PendingTrial {
+    /// The reboot order's sequence number.
+    pub seq: u64,
+    pub slot: Slot,
+    pub version: String,
+}
+
 /// What the board remembers between runs.
 #[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq)]
 pub struct AgentState {
     /// The highest sequence number accepted (or consumed). Orders at or
     /// below it are replays.
     pub last_seq: u64,
-    /// The newest manifest's toplevel, fetched and checked.
-    pub available: Option<String>,
+    /// The newest manifest's bundle.
+    pub available: Option<Bundle>,
+    #[serde(default)]
+    pub slot_a: Option<SlotContent>,
+    #[serde(default)]
+    pub slot_b: Option<SlotContent>,
+    #[serde(default)]
+    pub trial: Option<PendingTrial>,
     pub results: VecDeque<ActionResult>,
+}
+
+impl AgentState {
+    pub fn slot(&self, s: Slot) -> &Option<SlotContent> {
+        match s {
+            Slot::A => &self.slot_a,
+            Slot::B => &self.slot_b,
+        }
+    }
+
+    fn slot_mut(&mut self, s: Slot) -> &mut Option<SlotContent> {
+        match s {
+            Slot::A => &mut self.slot_a,
+            Slot::B => &mut self.slot_b,
+        }
+    }
+
+    /// The slot holding `bundle`, if one does.
+    pub fn holding(&self, bundle: &Bundle) -> Option<Slot> {
+        let d = bundle.digest();
+        [Slot::A, Slot::B]
+            .into_iter()
+            .find(|s| self.slot(*s).as_ref().is_some_and(|c| c.digest == d))
+    }
 }
 
 /// How an order went.
@@ -97,6 +156,43 @@ pub fn check_server_url(url: &str, allow_http: bool) -> Result<(), String> {
     ))
 }
 
+/// Copy at most `f.size` bytes from `from` into `to`, then check the count
+/// and the SHA-256 against `f`.
+fn copy_checked(f: &BundleFile, from: &mut dyn Read, to: &mut dyn Write) -> Result<(), String> {
+    let mut hash = Sha256::new();
+    let mut left = f.size;
+    let mut buf = vec![0u8; CHUNK];
+    let mut from = from.take(f.size.saturating_add(1));
+    loop {
+        let n = from
+            .read(&mut buf)
+            .map_err(|e| format!("{}: read: {e}", f.name))?;
+        if n == 0 {
+            break;
+        }
+        if n as u64 > left {
+            return Err(format!("{}: longer than {} bytes", f.name, f.size));
+        }
+        left -= n as u64;
+        hash.update(&buf[..n]);
+        to.write_all(&buf[..n])
+            .map_err(|e| format!("{}: write: {e}", f.name))?;
+    }
+    if left != 0 {
+        return Err(format!(
+            "{}: {} bytes, want {}",
+            f.name,
+            f.size - left,
+            f.size
+        ));
+    }
+    let got = hex(&hash.finalize());
+    if got != f.sha256 {
+        return Err(format!("{}: SHA-256 {got}, want {}", f.name, f.sha256));
+    }
+    Ok(())
+}
+
 impl<S: System> Agent<S> {
     pub fn new(cfg: Config, sys: S) -> Result<Self, String> {
         if cfg.trusted.is_empty() {
@@ -111,7 +207,9 @@ impl<S: System> Agent<S> {
             Err(e) => return Err(format!("{}: {e}", path.display())),
         };
         let http = ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(30)))
+            .timeout_connect(Some(Duration::from_secs(30)))
+            .timeout_recv_response(Some(Duration::from_secs(30)))
+            .timeout_recv_body(Some(Duration::from_secs(3600)))
             .user_agent(concat!("emco-fleet-agent/", env!("CARGO_PKG_VERSION")))
             .build()
             .into();
@@ -176,10 +274,119 @@ impl<S: System> Agent<S> {
         run_state_from_api(&body)
     }
 
+    // ------------------------------------------------------- the boot state
+
+    /// The newest valid boot-state copy; `Ok(None)` when neither is valid,
+    /// `Err` when the card could not be read.
+    pub fn boot_state(&self) -> Result<Option<BootState>, String> {
+        let [a, b] = self.sys.read_bootstate()?;
+        Ok(bootstate::newest([&a, &b]).map(|(_, s)| s))
+    }
+
+    /// Replace the boot state with `next` (its `seq` is ignored): written
+    /// to the older copy, so a torn write leaves the current one.
+    fn write_boot_state(&self, next: BootState) -> Result<(), String> {
+        let [a, b] = self.sys.read_bootstate()?;
+        let (copy, bytes) = bootstate::plan_write([&a, &b], next);
+        self.sys.write_bootstate(copy, &bytes)
+    }
+
+    /// Commit a healthy trial boot, tidy the state after a fallback, and
+    /// report how the last trial went. Writes nothing if the card cannot be
+    /// read or this boot's slot is unknown.
+    pub fn settle_boot(&mut self) -> Result<(), String> {
+        let Some(booted) = self.sys.booted_slot() else {
+            return Ok(());
+        };
+        let state = match self.boot_state() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("emco-fleet-agent: boot state: {e}");
+                return Ok(());
+            }
+        };
+        let before = self.state.clone();
+        let trying = is_trial_boot(state.as_ref(), booted);
+        let healthy = self.local_run_state();
+        let mut now = state;
+        if trying && healthy.is_err() {
+            // Not proven: leave it uncommitted. The next reboot falls back.
+        } else if let Some(next) = on_boot(state.as_ref(), booted) {
+            self.write_boot_state(next)?;
+            now = self.boot_state()?;
+        }
+        if let Some(t) = self.state.trial.clone() {
+            match trial_outcome(t.slot, Some(booted), now.as_ref()) {
+                TrialOutcome::Committed => {
+                    self.state.trial = None;
+                    self.record(
+                        t.seq,
+                        "boot",
+                        Outcome::Done,
+                        format!("booted slot {} ({}) and committed it", t.slot, t.version),
+                    );
+                }
+                TrialOutcome::RolledBack => {
+                    self.state.trial = None;
+                    self.record(
+                        t.seq,
+                        "boot",
+                        Outcome::Failed,
+                        format!(
+                            "slot {} ({}) did not come up; back on slot {booted}",
+                            t.slot, t.version
+                        ),
+                    );
+                }
+                TrialOutcome::Pending => {
+                    if let (true, Err(why)) = (trying, &healthy) {
+                        self.record(
+                            t.seq,
+                            "boot",
+                            Outcome::Deferred,
+                            format!("trial boot of slot {} not committed: {why}", t.slot),
+                        );
+                    }
+                }
+            }
+        }
+        if self.state != before {
+            self.save()?;
+        }
+        Ok(())
+    }
+
+    // ------------------------------------------------------------ telemetry
+
+    fn slots(&self) -> Option<Slots> {
+        let booted = self.sys.booted_slot();
+        let state = self.boot_state().ok().flatten();
+        if booted.is_none() && state.is_none() {
+            return None;
+        }
+        let name = |s: Slot| self.state.slot(s).as_ref().map(|c| c.version.clone());
+        Some(Slots {
+            booted: booted.map(|s| s.to_string()),
+            active: state.map(|s| s.active.to_string()),
+            try_slot: state
+                .as_ref()
+                .and_then(BootState::pending_try)
+                .map(|s| s.to_string()),
+            a: name(Slot::A),
+            b: name(Slot::B),
+            available: self.state.available.as_ref().map(|b| b.version.clone()),
+            staged: self
+                .state
+                .available
+                .as_ref()
+                .is_some_and(|b| self.state.holding(b).is_some()),
+        })
+    }
+
     pub fn telemetry(&self) -> Telemetry {
         let mut t = self.sys.host_telemetry();
         t.agent_version = env!("CARGO_PKG_VERSION").to_string();
-        t.available_system = self.state.available.clone();
+        t.slots = self.slots();
         t.run_state = match self.local_run_state() {
             Ok(s) => s.as_str().to_string(),
             Err(e) => telemetry::clip(&format!("unknown: {e}"), 120),
@@ -188,25 +395,24 @@ impl<S: System> Agent<S> {
         t
     }
 
-    fn poll_url(&self) -> String {
-        format!(
-            "{}/api/v1/devices/{}/poll",
-            self.cfg.server.trim_end_matches('/'),
-            self.cfg.identity.device
-        )
+    // ------------------------------------------------------------- the wire
+
+    fn api(&self, path: &str) -> String {
+        format!("{}/api/v1/{path}", self.cfg.server.trim_end_matches('/'))
     }
 
     fn post_poll(&self, last_seq: u64) -> Result<PollResponse, String> {
+        let url = self.api(&format!("devices/{}/poll", self.cfg.identity.device));
         let req = PollRequest {
             last_seq,
             telemetry: self.telemetry(),
         };
         let mut resp = self
             .http
-            .post(&self.poll_url())
+            .post(&url)
             .header("Authorization", &format!("Bearer {}", self.cfg.token))
             .send_json(&req)
-            .map_err(|e| format!("poll {}: {e}", self.poll_url()))?;
+            .map_err(|e| format!("poll {url}: {e}"))?;
         resp.body_mut()
             .read_json()
             .map_err(|e| format!("poll answer: {e}"))
@@ -217,9 +423,10 @@ impl<S: System> Agent<S> {
         self.post_poll(self.state.last_seq).map(drop)
     }
 
-    /// One poll: report, take the orders, carry them out, report again if
-    /// anything happened.
+    /// One poll: settle the boot, report, take the orders, carry them out,
+    /// report again if anything happened.
     pub fn poll_once(&mut self) -> Result<(), String> {
+        self.settle_boot()?;
         let resp = self.post_poll(self.state.last_seq)?;
         let envs: Vec<Envelope> = resp.manifest.into_iter().chain(resp.commands).collect();
         if envs.is_empty() {
@@ -297,137 +504,176 @@ impl<S: System> Agent<S> {
         interlock(step, &self.local_run_state())
     }
 
-    /// Substitute the closure, then check it is a NixOS system for this host.
-    fn fetch(&self, toplevel: &str) -> Result<(), String> {
-        self.sys.realise(toplevel)?;
-        check_toplevel(
-            toplevel,
-            &self.sys.toplevel_facts(toplevel),
-            &self.cfg.identity,
-        )
+    // ------------------------------------------------------------ the slots
+
+    fn download(&self, f: &BundleFile, to: &mut dyn Write) -> Result<(), String> {
+        let url = self.api(&format!("files/{}", f.sha256));
+        let resp = self
+            .http
+            .get(&url)
+            .header("Authorization", &format!("Bearer {}", self.cfg.token))
+            .call()
+            .map_err(|e| format!("{}: {url}: {e}", f.name))?;
+        let mut body = resp.into_body().into_reader();
+        copy_checked(f, &mut body, to)
     }
 
-    /// Make `toplevel` the newest system generation, keeping the running
-    /// system in the boot menu (`plan_profile`).
-    fn set_profile(&self, toplevel: &str) -> Result<String, String> {
-        let gens = self.sys.generations()?;
-        let current = self.sys.current_system();
-        let plan = plan_profile(
-            current.as_deref(),
-            &gens,
-            toplevel,
-            MENU_GENERATIONS,
-            KEEP_MAX_AGE_S,
-        );
-        let mut note = String::new();
-        if let Some(keep) = &plan.preserve {
-            self.sys.set_profile(keep)?;
-            note.push_str("kept the running system as a new generation; ");
+    /// Read every file of `bundle` back from `slot`, from the card.
+    fn check_slot(&self, slot: Slot, bundle: &Bundle) -> Result<(), String> {
+        for f in &bundle.files {
+            let dest = Dest::new(slot, &f.name).ok_or_else(|| format!("{}?", f.name))?;
+            let mut from = self.sys.open_read(&dest, f.size)?;
+            copy_checked(f, &mut from, &mut std::io::sink())
+                .map_err(|e| format!("slot {slot} read back: {e}"))?;
         }
-        if plan.set_target {
-            self.sys.set_profile(toplevel)?;
-        }
-        Ok(note)
+        Ok(())
     }
 
-    fn stage(&self, toplevel: &str) -> Result<String, String> {
-        let note = self.set_profile(toplevel)?;
-        self.sys.activate(toplevel, Activation::Boot)?;
-        Ok(format!("{note}staged {toplevel} for the next boot"))
+    fn write_slot(&self, slot: Slot, bundle: &Bundle) -> Result<(), String> {
+        for f in &bundle.files {
+            let dest = Dest::new(slot, &f.name).ok_or_else(|| format!("{}?", f.name))?;
+            if dest.is_rootfs() {
+                let cap = self.sys.capacity(&dest)?;
+                if f.size > cap {
+                    return Err(format!(
+                        "{} is {} bytes; slot {slot} holds {cap}",
+                        f.name, f.size
+                    ));
+                }
+            }
+            let mut w = self.sys.open_write(&dest)?;
+            self.download(f, &mut w)?;
+            w.finish()?;
+        }
+        self.check_slot(slot, bundle)
+    }
+
+    /// Write `bundle` into the inactive slot and check it, unless it is
+    /// there already (then check it again). Returns the slot.
+    fn stage(&mut self, bundle: &Bundle) -> Result<(Slot, String), String> {
+        let state = self.boot_state()?;
+        let plan = stage_target(state.as_ref(), self.sys.booted_slot())?;
+        let slot = plan.slot;
+        let digest = bundle.digest();
+        if self
+            .state
+            .slot(slot)
+            .as_ref()
+            .is_some_and(|c| c.digest == digest)
+        {
+            self.check_slot(slot, bundle)?;
+            return Ok((
+                slot,
+                format!("{} already in slot {slot}; checked", bundle.version),
+            ));
+        }
+        if let Some(clear) = plan.clear_try {
+            self.write_boot_state(clear)?;
+        }
+        // From here until it is checked, the slot holds nothing usable.
+        *self.state.slot_mut(slot) = None;
+        self.save()?;
+        if let Err(e) = self.write_slot(slot, bundle) {
+            let undo = self
+                .sys
+                .invalidate(slot)
+                .err()
+                .map(|u| format!("; and invalidating it failed: {u}"))
+                .unwrap_or_default();
+            return Err(format!("{e}{undo}"));
+        }
+        *self.state.slot_mut(slot) = Some(SlotContent {
+            digest,
+            version: bundle.version.clone(),
+        });
+        self.save()?;
+        Ok((
+            slot,
+            format!(
+                "wrote {} ({} bytes) to slot {slot} and read it back",
+                bundle.version,
+                bundle.total_size()
+            ),
+        ))
     }
 
     fn execute(&mut self, order: &Order) -> Result<Exec, String> {
         Ok(match order {
             Order::Manifest(m) => self.manifest(m),
             Order::Command(c) => match &c.action {
-                Action::Stage { toplevel } => {
-                    match self.fetch(toplevel).and_then(|()| self.stage(toplevel)) {
-                        Ok(d) => Exec::Done(d),
-                        Err(e) => Exec::Failed(e),
-                    }
-                }
-                Action::Switch { toplevel } => self.switch(c, toplevel)?,
-                Action::Reboot { toplevel } => self.reboot(c, toplevel.as_deref())?,
+                Action::Stage { bundle } => match self.stage(bundle) {
+                    Ok((_, d)) => Exec::Done(d),
+                    Err(e) => Exec::Failed(e),
+                },
+                Action::Reboot { bundle } => self.reboot(c, bundle.as_ref())?,
             },
         })
     }
 
     fn manifest(&mut self, m: &Manifest) -> Exec {
-        if let Err(e) = self.fetch(&m.toplevel) {
-            return Exec::Failed(e);
-        }
-        self.state.available = Some(m.toplevel.clone());
+        self.state.available = Some(m.bundle.clone());
         if !m.stage {
-            return Exec::Done(format!("fetched {}", m.toplevel));
+            return Exec::Done(format!("{} is available", m.bundle.version));
         }
-        match self.stage(&m.toplevel) {
-            Ok(d) => Exec::Done(format!("fetched; {d}")),
+        match self.stage(&m.bundle) {
+            Ok((_, d)) => Exec::Done(d),
             Err(e) => Exec::Failed(e),
         }
     }
 
-    fn switch(&mut self, c: &Command, toplevel: &str) -> Result<Exec, String> {
-        if let Gate::Defer(why) = self.gate(Step::Switch) {
-            return Ok(Exec::Deferred(format!("switch deferred: {why}")));
-        }
-        if let Err(e) = self.fetch(toplevel) {
-            return Ok(Exec::Failed(e));
-        }
-        let note = match self.set_profile(toplevel) {
-            Ok(n) => n,
-            Err(e) => return Ok(Exec::Failed(e)),
-        };
-        // Again, immediately before activating.
-        if let Gate::Defer(why) = self.gate(Step::Switch) {
-            // The profile already points at it; make the boot entry agree,
-            // which is the same as a stage.
-            return Ok(match self.sys.activate(toplevel, Activation::Boot) {
-                Ok(()) => Exec::Deferred(format!(
-                    "{note}staged for the next boot; switch deferred: {why}"
-                )),
-                Err(e) => Exec::Failed(format!("switch deferred ({why}), and staging failed: {e}")),
-            });
-        }
-        // At most once: if activation restarts this agent, the order is
-        // already used up and the next run sees the new current-system.
-        self.state.last_seq = c.seq;
-        self.record(
-            c.seq,
-            "switch",
-            Outcome::Done,
-            format!("{note}activating {toplevel}"),
-        );
-        self.save()?;
-        Ok(match self.sys.activate(toplevel, Activation::Switch) {
-            Ok(()) => Exec::Done(format!("{note}switched to {toplevel}")),
-            Err(e) => Exec::Failed(e),
-        })
-    }
-
-    fn reboot(&mut self, c: &Command, toplevel: Option<&str>) -> Result<Exec, String> {
-        let mut staged = String::new();
-        if let Some(t) = toplevel {
-            match self.fetch(t).and_then(|()| self.stage(t)) {
-                Ok(d) => staged = format!("{d}; "),
+    fn reboot(&mut self, c: &Command, bundle: Option<&Bundle>) -> Result<Exec, String> {
+        let mut note = String::new();
+        let mut target = None;
+        if let Some(b) = bundle {
+            match self.stage(b) {
+                Ok((slot, d)) => {
+                    note = format!("{d}; ");
+                    target = Some((slot, b.version.clone()));
+                }
                 Err(e) => return Ok(Exec::Failed(e)),
             }
         }
         if let Gate::Defer(why) = self.gate(Step::Reboot) {
-            return Ok(Exec::Deferred(format!("{staged}reboot deferred: {why}")));
+            return Ok(Exec::Deferred(format!("{note}reboot deferred: {why}")));
+        }
+        let previous = self.state.last_seq;
+        let mut committed = None;
+        if let Some((slot, version)) = &target {
+            let Some(state) = self.boot_state()? else {
+                return Ok(Exec::Failed("the boot state is unreadable".into()));
+            };
+            if let Err(e) = self.write_boot_state(trial(&state, *slot)) {
+                return Ok(Exec::Failed(e));
+            }
+            committed = Some(state);
+            self.state.trial = Some(PendingTrial {
+                seq: c.seq,
+                slot: *slot,
+                version: version.clone(),
+            });
+            note.push_str(&format!("slot {slot} to be tried once; "));
         }
         // Use the order up on disk before going down, so it cannot loop, and
         // say so. The report still gives the server the previous seq, so it
         // keeps the order queued in case the check below defers it; the
         // first poll after the reboot carries the new one.
-        let previous = self.state.last_seq;
         self.state.last_seq = c.seq;
-        self.record(c.seq, "reboot", Outcome::Done, format!("{staged}rebooting"));
+        self.record(c.seq, "reboot", Outcome::Done, format!("{note}rebooting"));
         self.save()?;
         let reported = self.post_poll(previous).map(drop);
         // Again, immediately before acting.
         if let Gate::Defer(why) = self.gate(Step::Reboot) {
             self.state.last_seq = previous;
-            return Ok(Exec::Deferred(format!("{staged}reboot deferred: {why}")));
+            self.state.trial = None;
+            if let Some(state) = committed {
+                // Back to what it was: nothing to try.
+                self.write_boot_state(BootState {
+                    try_slot: None,
+                    tries: 0,
+                    ..state
+                })?;
+            }
+            return Ok(Exec::Deferred(format!("{note}reboot deferred: {why}")));
         }
         if let Err(e) = reported {
             eprintln!("emco-fleet-agent: could not report before rebooting: {e}");
@@ -438,12 +684,17 @@ impl<S: System> Agent<S> {
 
 #[cfg(test)]
 mod tests {
-    /// The executor runs nothing but the four programs in its docs, and
-    /// names none of the boot-firmware tools.
+    /// The executor runs nothing but `systemctl`, and names none of the
+    /// boot-firmware tools.
     #[test]
-    fn executor_runs_only_the_allowed_programs() {
-        let src = include_str!("system.rs");
-        let allowed = ["nix-store", "nix-env", "systemd-run", "systemctl"];
+    fn executor_touches_only_the_slots() {
+        // The code, not the comments that say what it leaves alone.
+        let src: String = include_str!("system.rs")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        let allowed = ["systemctl"];
         for (i, _) in src.match_indices("Command::new(") {
             let rest = &src[i + "Command::new(".len()..];
             let arg = rest.split(')').next().unwrap().trim();
@@ -453,7 +704,7 @@ mod tests {
                 "spawns {arg}"
             );
         }
-        assert_eq!(src.matches("Command::new(").count(), 5);
+        assert_eq!(src.matches("Command::new(").count(), 2);
         let forbidden = [
             ["fw_", "setenv"].concat(),
             ["fw_", "printenv"].concat(),
@@ -467,10 +718,36 @@ mod tests {
             ["mk", "fs"].concat(),
             ["nix-collect", "-garbage"].concat(),
             ["--delete", "-generations"].concat(),
+            ["boot", ".scr"].concat(),
+            ["sfdisk"].concat(),
+            ["-0", "1\""].concat(),
+            ["-0", "4\""].concat(),
         ];
         for f in &forbidden {
             assert!(!src.contains(f.as_str()), "system.rs mentions {f}");
         }
+    }
+
+    #[test]
+    fn copies_are_checked() {
+        use super::copy_checked;
+        use emco_fleet_proto::bundle::BundleFile;
+        use sha2::{Digest, Sha256};
+        let data = b"0123456789";
+        let f = BundleFile {
+            name: "Image".into(),
+            size: 10,
+            sha256: emco_fleet_proto::keys::hex(&Sha256::digest(data)),
+        };
+        let mut out = Vec::new();
+        copy_checked(&f, &mut &data[..], &mut out).unwrap();
+        assert_eq!(out, data);
+        let e = copy_checked(&f, &mut &b"01234567890"[..], &mut Vec::new()).unwrap_err();
+        assert!(e.contains("longer"), "{e}");
+        let e = copy_checked(&f, &mut &b"012345678"[..], &mut Vec::new()).unwrap_err();
+        assert!(e.contains("9 bytes"), "{e}");
+        let e = copy_checked(&f, &mut &b"0123456780"[..], &mut Vec::new()).unwrap_err();
+        assert!(e.contains("SHA-256"), "{e}");
     }
 
     #[test]

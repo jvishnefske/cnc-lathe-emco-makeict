@@ -1,26 +1,31 @@
 # services.emco-fleet-agent: the board's side of the fleet server
-# (kd240/fleet/README.md). OFF by default, and not imported by
-# configuration.nix yet.
+# (kd240/fleet/README.md). OFF by default; for the A/B card layout
+# (ab.nix), which is not imported by configuration.nix.
 #
 # Every poll (a timer) it reports telemetry and fetches the owner-signed
 # orders for this device. It acts only on orders that verify against
-# `trustedKeys`, name this device, carry a sequence number above the last
-# one it accepted (kept in /var/lib/emco-fleet-agent), and point at a NixOS
-# system for this host, fetched from a binary cache Nix trusts.
+# `trustedKeys` (middleware's verifier: ed25519, or P-256 from the owner's
+# card), name this device, carry a sequence number above the last one it
+# accepted (kept in /var/lib/emco-fleet-agent), and carry a well-formed
+# release bundle for this device class.
 #
-# Interlock: `switch` and `reboot` run only while emco-kd240's
-# GET /api/state says run = idle or disconnected, checked when the order is
-# taken up and again immediately before acting; otherwise they are deferred
-# and reported, never forced. `stage` (the next boot's default) is always
-# allowed. It never writes the QSPI, the U-Boot environment or the FAT
-# boot partition, and it sends the lathe service nothing.
+# What it writes: the inactive slot (its raw partition and its directory on
+# the FAT boot partition, each file checked by size and SHA-256 and read
+# back from the card), and the two A/B boot-state sectors. Never the QSPI,
+# its U-Boot environment, the partition table, boot.scr, or the data
+# partition beyond its own state directory.
 #
-# It runs as root because it must: it sets the system profile and asks
-# systemd to activate and reboot. The process itself sees /, /boot and the
-# rest read-only (except /nix/var/nix and its state), no devices, and no
-# /boot/firmware. Activation runs as its own transient unit
-# (systemd-run), as nixos-rebuild does.
-{ config, lib, pkgs, ... }:
+# Interlock: `reboot` runs only while emco-kd240's GET /api/state says
+# run = idle or disconnected, checked when the order is taken up and again
+# immediately before acting; otherwise it is deferred and reported, never
+# forced. Staging is always allowed: nothing running uses the inactive
+# slot. A trial boot of a new slot is committed once the lathe service
+# answers; until then U-Boot falls back at the next reset. It sends the
+# lathe service nothing.
+#
+# It runs as root because it must write block devices; it sees the rest of
+# the system read-only, and only the SD card's block devices.
+{ config, lib, pkgs, middlewareSrc, ... }:
 
 let
   cfg = config.services.emco-fleet-agent;
@@ -29,12 +34,12 @@ let
 in
 {
   options.services.emco-fleet-agent = {
-    enable = mkEnableOption "the KD240 fleet agent (telemetry and owner-signed NixOS updates)";
+    enable = mkEnableOption "the KD240 fleet agent (telemetry and owner-signed A/B updates)";
 
     package = mkOption {
       type = types.package;
-      default = pkgs.callPackage ../fleet/nix/package.nix { members = [ "emco-fleet-agent" ]; };
-      defaultText = lib.literalExpression ''pkgs.callPackage ../fleet/nix/package.nix { members = [ "emco-fleet-agent" ]; }'';
+      default = pkgs.callPackage ../fleet/nix/package.nix { inherit middlewareSrc; members = [ "emco-fleet-agent" ]; };
+      defaultText = lib.literalExpression ''pkgs.callPackage ../fleet/nix/package.nix { inherit middlewareSrc; members = [ "emco-fleet-agent" ]; }'';
       description = "The emco-fleet-agent package.";
     };
 
@@ -67,18 +72,17 @@ in
       description = "Public keys whose signed manifests and commands the board obeys (`emco-fleet keygen`).";
     };
 
-    substituter = mkOption {
-      type = types.nullOr types.str;
-      default = null;
-      example = "https://fleet.example.com/cache";
-      description = "The binary cache the published closures come from (added to nix.settings.extra-substituters).";
+    diskId = mkOption {
+      type = types.strMatching "[0-9a-f]{8}";
+      default = config.system.build.abDiskId or "4b443234";
+      defaultText = lib.literalExpression "config.system.build.abDiskId";
+      description = "The SD card's MBR disk id: the slots are /dev/disk/by-partuuid/<id>-02 and -03.";
     };
 
-    substituterPublicKey = mkOption {
-      type = types.nullOr types.str;
-      default = null;
-      example = "emco-fleet-cache-1:…";
-      description = "That cache's signing key, from `nix-store --generate-binary-cache-key` (added to extra-trusted-public-keys).";
+    bootDir = mkOption {
+      type = types.str;
+      default = "/boot";
+      description = "Where the FAT boot partition (KD240BOOT, the slots' boot files) is mounted.";
     };
 
     localStateUrl = mkOption {
@@ -104,23 +108,14 @@ in
         assertion = lib.hasPrefix "/" cfg.tokenFile && !lib.hasPrefix builtins.storeDir cfg.tokenFile;
         message = "services.emco-fleet-agent.tokenFile must be an absolute path outside the Nix store.";
       }
-      {
-        assertion = (cfg.substituter == null) == (cfg.substituterPublicKey == null);
-        message = "services.emco-fleet-agent: set substituter and substituterPublicKey together.";
-      }
     ];
 
-    nix.settings = mkIf (cfg.substituter != null) {
-      extra-substituters = [ cfg.substituter ];
-      extra-trusted-public-keys = [ cfg.substituterPublicKey ];
-    };
-
     systemd.services.emco-fleet-agent = {
-      description = "KD240 fleet agent (telemetry, owner-signed NixOS updates)";
+      description = "KD240 fleet agent (telemetry, owner-signed A/B updates)";
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
-      # nix-store, nix-env; systemd-run, systemctl.
-      path = [ config.nix.package config.systemd.package ];
+      # systemctl (reboot, and the failed-unit count).
+      path = [ config.systemd.package ];
       environment.HOME = state;
       serviceConfig = {
         Type = "oneshot";
@@ -130,23 +125,23 @@ in
           "--server" (escapeShellArg cfg.serverUrl)
           "--device" (escapeShellArg cfg.deviceId)
           "--token-file" (escapeShellArg cfg.tokenFile)
-          "--host" (escapeShellArg config.networking.hostName)
-          "--system" (escapeShellArg pkgs.stdenv.hostPlatform.system)
+          "--disk-id" cfg.diskId
+          "--boot-dir" (escapeShellArg cfg.bootDir)
           "--state-dir" state
           "--local-state-url" (escapeShellArg cfg.localStateUrl)
         ] ++ map (k: "--trusted-key ${escapeShellArg k}") cfg.trustedKeys);
         StateDirectory = "emco-fleet-agent";
         StateDirectoryMode = "0700";
-        # A first closure can be large.
+        # A root file system is a few hundred MiB over the network.
         TimeoutStartSec = "2h";
-        # Root, because profile and activation need it; the process itself
-        # is fenced in. switch-to-configuration runs in its own unit.
+        # Root, because it writes the card's block devices; the rest is
+        # fenced in. Only SCSI disks (the USB card reader) are reachable.
         ProtectSystem = "strict";
-        ReadWritePaths = [ "/nix/var/nix" ];
-        InaccessiblePaths = [ "-/boot/firmware" ];
+        ReadWritePaths = [ cfg.bootDir ];
         ProtectHome = true;
         PrivateTmp = true;
-        PrivateDevices = true;
+        DevicePolicy = "closed";
+        DeviceAllow = [ "block-sd rw" ];
         ProtectKernelTunables = true;
         ProtectKernelModules = true;
         ProtectControlGroups = true;

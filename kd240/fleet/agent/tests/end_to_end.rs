@@ -1,24 +1,66 @@
-//! The server in process, a fake lathe service, a fake system executor, and
-//! the real agent between them. Nothing here runs Nix or reboots.
+//! The server in process, a fake lathe service, a fake SD card with two
+//! slots and the boot-state sectors (and U-Boot's half of the A/B rule),
+//! and the real agent between them. Nothing here touches a disk or reboots.
 
+use std::collections::BTreeMap;
+use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use emco_fleet_agent::{Activation, Agent, Config, System};
-use emco_fleet_proto::keys::{Envelope, SecretKey};
+use emco_fleet_agent::{Agent, Config, Dest, SlotWriter, System};
+use emco_fleet_proto::bootstate::{self, BootState, Slot, SECTOR};
+use emco_fleet_proto::bundle::{Bundle, BundleFile, FILES, FORMAT};
+use emco_fleet_proto::keys::{
+    hex, sign_order, Envelope, P256SecretKey, PublicKey, SecretKey, Signer,
+};
 use emco_fleet_proto::msg::{
     Action, Command, DeviceDetail, Manifest, Order, Outcome, PollResponse, Telemetry,
 };
-use emco_fleet_proto::policy::{Generation, Identity, ToplevelFacts};
+use emco_fleet_proto::policy::Identity;
 use emco_fleet_proto::token::TokenHash;
+use sha2::{Digest, Sha256};
 
-const HASH: &str = "0123456789abcdfghijklmnpqrsvwxyz";
 const NOW: u64 = 1_800_000_000;
+/// The fake card's root file system partitions.
+const ROOTFS_CAPACITY: u64 = 4096;
 
-fn top(v: &str) -> String {
-    format!("/nix/store/{HASH}-nixos-system-kd240-{v}")
+/// A bundle and its files' bytes.
+struct Built {
+    bundle: Bundle,
+    files: Vec<(String, Vec<u8>)>,
+}
+
+fn build(v: &str) -> Built {
+    let mut files = Vec::new();
+    let entries = FILES
+        .iter()
+        .map(|name| {
+            let data = match *name {
+                "rootfs.squashfs" => format!("squashfs {v} ").repeat(40).into_bytes(),
+                "cmdline" => format!("bootargs=init=/nix/store/x-{v}/init\n").into_bytes(),
+                _ => format!("{name} of {v}").into_bytes(),
+            };
+            let sha = hex(&Sha256::digest(&data));
+            files.push((sha.clone(), data.clone()));
+            BundleFile {
+                name: name.to_string(),
+                size: data.len() as u64,
+                sha256: sha,
+            }
+        })
+        .collect();
+    Built {
+        bundle: Bundle {
+            format: FORMAT.into(),
+            class: "kd240".into(),
+            version: format!("/nix/store/0123456789abcdfghijklmnpqrsvwxyz-kd240-{v}"),
+            created: NOW,
+            files: entries,
+        },
+        files,
+    }
 }
 
 // ------------------------------------------------------------- the server
@@ -60,14 +102,20 @@ fn fake_lathe(run: Arc<Mutex<String>>) -> String {
 struct Fleet {
     dir: tempfile::TempDir,
     url: String,
-    key: SecretKey,
+    key: Box<dyn Signer>,
+    public: PublicKey,
     run: Arc<Mutex<String>>,
     lathe_url: String,
 }
 
 fn fleet(server_checks_signatures: bool) -> Fleet {
-    let dir = tempfile::tempdir().unwrap();
     let key = SecretKey::generate("emco-fleet-1").unwrap();
+    let public = key.public();
+    fleet_with(Box::new(key), public, server_checks_signatures)
+}
+
+fn fleet_with(key: Box<dyn Signer>, public: PublicKey, server_checks_signatures: bool) -> Fleet {
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path();
     std::fs::write(p.join("admin"), "admin-token\n").unwrap();
     std::fs::write(
@@ -75,12 +123,10 @@ fn fleet(server_checks_signatures: bool) -> Fleet {
         format!("kd240 {}\n", TokenHash::of("dev-token").to_text()),
     )
     .unwrap();
-    std::fs::write(p.join("keys"), key.public().to_text()).unwrap();
-    std::fs::create_dir_all(p.join("cache")).unwrap();
+    std::fs::write(p.join("keys"), public.to_text()).unwrap();
     let cfg = emco_fleet_server::Config {
         listen: String::new(),
         data_dir: p.join("data"),
-        cache_dir: p.join("cache"),
         admin_token_file: p.join("admin"),
         device_tokens_file: p.join("devices"),
         trusted_keys_file: server_checks_signatures.then(|| p.join("keys")),
@@ -96,6 +142,7 @@ fn fleet(server_checks_signatures: bool) -> Fleet {
         dir,
         url,
         key,
+        public,
         run,
         lathe_url,
     }
@@ -111,6 +158,22 @@ fn http() -> ureq::Agent {
 impl Fleet {
     fn set_run(&self, s: &str) {
         *self.run.lock().unwrap() = s.to_string();
+    }
+
+    fn sign(&self, o: &Order) -> Envelope {
+        sign_order(self.key.as_ref(), o).unwrap()
+    }
+
+    /// Upload a bundle's files, as `emco-fleet publish` does.
+    fn upload(&self, b: &Built) {
+        for (sha, data) in &b.files {
+            let r = http()
+                .put(&format!("{}/api/v1/files/{sha}", self.url))
+                .header("Authorization", "Bearer admin-token")
+                .send(&data[..])
+                .unwrap();
+            assert!(r.status().is_success(), "{}", r.status());
+        }
     }
 
     fn agent(&self, sys: FakeSystem) -> Agent<FakeSystem> {
@@ -129,11 +192,10 @@ impl Fleet {
                 server: server.to_string(),
                 identity: Identity {
                     device: "kd240".into(),
-                    host: "kd240".into(),
-                    system: "aarch64-linux".into(),
+                    class: "kd240".into(),
                 },
                 token: token.into(),
-                trusted: vec![self.key.public()],
+                trusted: vec![self.public.clone()],
                 state_dir: self.dir.path().join("agent"),
                 local_state_url: lathe.to_string(),
             },
@@ -178,13 +240,11 @@ impl Fleet {
         serde_json::from_str(&body).unwrap()
     }
 
-    fn manifest(&self, seq: u64, toplevel: &str, stage: bool) -> Envelope {
-        self.key.sign(&Order::Manifest(Manifest {
+    fn manifest(&self, seq: u64, bundle: &Bundle, stage: bool) -> Envelope {
+        self.sign(&Order::Manifest(Manifest {
             device: "kd240".into(),
             seq,
-            host: "kd240".into(),
-            system: "aarch64-linux".into(),
-            toplevel: toplevel.into(),
+            bundle: bundle.clone(),
             stage,
             created: NOW,
             note: "test".into(),
@@ -192,7 +252,7 @@ impl Fleet {
     }
 
     fn command(&self, seq: u64, action: Action) -> Envelope {
-        self.key.sign(&Order::Command(Command {
+        self.sign(&Order::Command(Command {
             device: "kd240".into(),
             seq,
             not_after: NOW + 3600,
@@ -201,36 +261,111 @@ impl Fleet {
     }
 }
 
-// ------------------------------------------------------ the fake executor
+// ------------------------------------------------------------ the fake card
 
-#[derive(Clone, Default)]
-struct FakeSystem {
-    log: Arc<Mutex<Vec<String>>>,
-    gens: Arc<Mutex<Vec<Generation>>>,
-    current: Arc<Mutex<Option<String>>>,
-    /// Set the lathe's run state when the profile changes: the operator
-    /// pressing cycle start in the middle of an update.
-    busy_after_profile: Option<(Arc<Mutex<String>>, String)>,
+#[derive(Default)]
+struct Card {
+    files: BTreeMap<Dest, Vec<u8>>,
+    bootstate: [Vec<u8>; 2],
+    booted: Option<Slot>,
+    log: Vec<String>,
+    /// Flip a byte of this file as it is written (a bad card).
+    corrupt: Option<&'static str>,
+    /// After a boot-state write, set the lathe's run state (the operator
+    /// started something between the two interlock checks).
+    busy_after_bootstate: Option<(Arc<Mutex<String>>, String)>,
 }
 
+#[derive(Clone)]
+struct FakeSystem(Arc<Mutex<Card>>);
+
 impl FakeSystem {
+    /// A fresh card: slot A committed and booted, nothing to try.
     fn new() -> Self {
-        let s = FakeSystem::default();
-        *s.current.lock().unwrap() = Some(top("1"));
-        s.gens.lock().unwrap().push(Generation {
-            number: 1,
-            target: top("1"),
-            age_s: 60,
-        });
-        s
+        let card = Card {
+            bootstate: [
+                bootstate::encode(&BootState::initial()).to_vec(),
+                vec![0; SECTOR],
+            ],
+            booted: Some(Slot::A),
+            ..Default::default()
+        };
+        FakeSystem(Arc::new(Mutex::new(card)))
+    }
+
+    fn card(&self) -> std::sync::MutexGuard<'_, Card> {
+        self.0.lock().unwrap()
     }
 
     fn log(&self) -> Vec<String> {
-        self.log.lock().unwrap().clone()
+        self.card().log.clone()
     }
 
-    fn push(&self, s: String) {
-        self.log.lock().unwrap().push(s);
+    fn state(&self) -> BootState {
+        let c = self.card();
+        bootstate::newest([&c.bootstate[0], &c.bootstate[1]])
+            .unwrap()
+            .1
+    }
+
+    /// U-Boot's boot.scr at power-on: a slot with tries left is booted
+    /// once (the count goes down first), otherwise the committed one.
+    fn power_on(&self) {
+        let s = self.state();
+        let mut c = self.card();
+        let booted = match s.pending_try() {
+            Some(t) => {
+                let (i, bytes) = bootstate::plan_write(
+                    [&c.bootstate[0], &c.bootstate[1]],
+                    BootState {
+                        tries: s.tries - 1,
+                        ..s
+                    },
+                );
+                c.bootstate[i] = bytes.to_vec();
+                t
+            }
+            None => s.active,
+        };
+        c.booted = Some(booted);
+        c.log.clear();
+    }
+
+    fn slot_file(&self, slot: Slot, name: &str) -> Option<Vec<u8>> {
+        self.card()
+            .files
+            .get(&Dest::new(slot, name).unwrap())
+            .cloned()
+    }
+}
+
+struct FakeWriter {
+    sys: FakeSystem,
+    dest: Dest,
+    buf: Vec<u8>,
+}
+
+impl Write for FakeWriter {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.buf.extend_from_slice(b);
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl SlotWriter for FakeWriter {
+    fn finish(self: Box<Self>) -> Result<(), String> {
+        let mut c = self.sys.card();
+        let mut data = self.buf;
+        if c.corrupt == Some(self.dest.file) && !data.is_empty() {
+            data[0] ^= 1;
+        }
+        c.log
+            .push(format!("write {}/{}", self.dest.slot, self.dest.file));
+        c.files.insert(self.dest, data);
+        Ok(())
     }
 }
 
@@ -241,63 +376,60 @@ impl System for FakeSystem {
     fn host_telemetry(&self) -> Telemetry {
         Telemetry {
             hostname: "kd240".into(),
-            current_system: self.current.lock().unwrap().clone(),
-            kernel_release: "6.18.0".into(),
             ..Default::default()
         }
     }
     fn current_system(&self) -> Option<String> {
-        self.current.lock().unwrap().clone()
+        None
     }
-    fn generations(&self) -> Result<Vec<Generation>, String> {
-        Ok(self.gens.lock().unwrap().clone())
+    fn booted_slot(&self) -> Option<Slot> {
+        self.card().booted
     }
-    fn realise(&self, toplevel: &str) -> Result<(), String> {
-        self.push(format!("realise {toplevel}"));
-        if toplevel.contains("missing") {
-            return Err("not in any cache".into());
+    fn read_bootstate(&self) -> Result<[Vec<u8>; 2], String> {
+        Ok(self.card().bootstate.clone())
+    }
+    fn write_bootstate(&self, copy: usize, sector: &[u8; SECTOR]) -> Result<(), String> {
+        let mut c = self.card();
+        c.bootstate[copy] = sector.to_vec();
+        let s = bootstate::decode(sector).unwrap();
+        let t = s.try_slot.map(|t| t.as_str()).unwrap_or("-");
+        c.log.push(format!("bootstate active={} try={t}", s.active));
+        if let Some((run, to)) = c.busy_after_bootstate.take() {
+            *run.lock().unwrap() = to;
         }
         Ok(())
     }
-    fn toplevel_facts(&self, toplevel: &str) -> ToplevelFacts {
-        ToplevelFacts {
-            system: Some(
-                if toplevel.contains("x86") {
-                    "x86_64-linux"
-                } else {
-                    "aarch64-linux"
-                }
-                .into(),
-            ),
-            hostname: Some("kd240".into()),
-            has_switch_to_configuration: true,
-            has_nixos_version: true,
-            has_init: true,
-        }
+    fn capacity(&self, dest: &Dest) -> Result<u64, String> {
+        Ok(if dest.is_rootfs() {
+            ROOTFS_CAPACITY
+        } else {
+            u64::MAX
+        })
     }
-    fn set_profile(&self, toplevel: &str) -> Result<(), String> {
-        self.push(format!("set-profile {toplevel}"));
-        let mut g = self.gens.lock().unwrap();
-        let n = g.iter().map(|g| g.number).max().unwrap_or(0) + 1;
-        g.push(Generation {
-            number: n,
-            target: toplevel.into(),
-            age_s: 0,
-        });
-        if let Some((run, to)) = &self.busy_after_profile {
-            *run.lock().unwrap() = to.clone();
-        }
-        Ok(())
+    fn open_write(&self, dest: &Dest) -> Result<Box<dyn SlotWriter>, String> {
+        assert_ne!(
+            Some(dest.slot),
+            self.booted_slot(),
+            "wrote the running slot"
+        );
+        Ok(Box::new(FakeWriter {
+            sys: self.clone(),
+            dest: dest.clone(),
+            buf: Vec::new(),
+        }))
     }
-    fn activate(&self, toplevel: &str, how: Activation) -> Result<(), String> {
-        self.push(format!("activate {} {toplevel}", how.arg()));
-        if how == Activation::Switch {
-            *self.current.lock().unwrap() = Some(toplevel.into());
-        }
+    fn open_read(&self, dest: &Dest, len: u64) -> Result<Box<dyn Read>, String> {
+        let data = self.card().files.get(dest).cloned().unwrap_or_default();
+        Ok(Box::new(std::io::Cursor::new(data).take(len)))
+    }
+    fn invalidate(&self, slot: Slot) -> Result<(), String> {
+        let mut c = self.card();
+        c.files.retain(|d, _| d.slot != slot);
+        c.log.push(format!("invalidate {slot}"));
         Ok(())
     }
     fn reboot(&self) -> Result<(), String> {
-        self.push("reboot".into());
+        self.card().log.push("reboot".into());
         Ok(())
     }
 }
@@ -319,52 +451,254 @@ fn evil_server(resp: PollResponse) -> String {
     format!("http://{}", serve(r))
 }
 
+fn writes(slot: Slot) -> Vec<String> {
+    FILES.iter().map(|f| format!("write {slot}/{f}")).collect()
+}
+
 // ---------------------------------------------------------------- tests
 
 #[test]
-fn publish_poll_fetch_stage_and_report() {
+fn publish_stage_reboot_and_commit() {
     let f = fleet(true);
-    f.publish(&f.manifest(10, &top("2"), true));
+    let v2 = build("2");
+    f.upload(&v2);
+    f.publish(&f.manifest(10, &v2.bundle, true));
     let sys = FakeSystem::new();
     let mut a = f.agent(sys.clone());
     a.poll_once().unwrap();
-    assert_eq!(
-        sys.log(),
-        [
-            format!("realise {}", top("2")),
-            format!("set-profile {}", top("2")),
-            format!("activate boot {}", top("2"))
-        ]
-    );
+
+    // Written into B, the slot this boot did not come from, and checked.
+    assert_eq!(sys.log(), writes(Slot::B));
+    for (file, (_, data)) in FILES.iter().zip(&v2.files) {
+        assert_eq!(sys.slot_file(Slot::B, file).as_ref(), Some(data), "{file}");
+    }
     assert_eq!(a.state.last_seq, 10);
-    assert_eq!(a.state.available.as_deref(), Some(top("2").as_str()));
-    // The report after the work reached the server.
-    let d = f.detail();
-    let latest = d.summary.latest.unwrap();
-    assert_eq!(latest.last_seq, 10);
-    assert_eq!(latest.telemetry.run_state, "idle");
-    assert_eq!(latest.telemetry.available_system, Some(top("2")));
-    let r = latest.telemetry.results.last().unwrap();
+    assert_eq!(
+        a.state.slot_b.as_ref().map(|c| c.version.as_str()),
+        Some(v2.bundle.version.as_str())
+    );
+    let t = f.detail().summary.latest.unwrap().telemetry;
+    let slots = t.slots.unwrap();
+    assert_eq!(slots.booted.as_deref(), Some("a"));
+    assert_eq!(slots.active.as_deref(), Some("a"));
+    assert!(slots.staged);
+    assert_eq!(slots.b.as_deref(), Some(v2.bundle.version.as_str()));
+    let r = t.results.last().unwrap();
     assert_eq!(
         (r.seq, r.what.as_str(), r.outcome),
         (10, "manifest", Outcome::Done)
     );
-    // Nothing more is handed out, and a second poll does nothing.
+
+    // Reboot into it: already there, so only read back, then marked for
+    // one try, then the reboot.
+    f.send(&f.command(
+        11,
+        Action::Reboot {
+            bundle: Some(v2.bundle.clone()),
+        },
+    ));
     a.poll_once().unwrap();
-    assert_eq!(sys.log().len(), 3);
+    assert_eq!(
+        sys.log()[FILES.len()..],
+        ["bootstate active=a try=b", "reboot"]
+    );
+    assert_eq!(a.state.last_seq, 11);
+    drop(a);
+
+    // U-Boot boots B once; the new system is healthy and commits itself.
+    sys.power_on();
+    assert_eq!(sys.booted_slot(), Some(Slot::B));
+    let mut a = f.agent(sys.clone());
+    a.poll_once().unwrap();
+    assert_eq!(sys.log(), ["bootstate active=b try=-"]);
+    assert_eq!(sys.state().active, Slot::B);
+    let (seq, what, outcome, detail) = last_result(&a);
+    assert_eq!((seq, what.as_str(), outcome), (11, "boot", Outcome::Done));
+    assert!(detail.contains("committed"), "{detail}");
+    assert!(a.state.trial.is_none());
+    let slots = f.detail().summary.latest.unwrap().telemetry.slots.unwrap();
+    assert_eq!(
+        (slots.booted.as_deref(), slots.active.as_deref()),
+        (Some("b"), Some("b"))
+    );
+    assert!(f.detail().summary.pending_commands.is_empty());
+
+    // And the next release goes to A.
+    let v3 = build("3");
+    f.upload(&v3);
+    f.send(&f.command(
+        12,
+        Action::Stage {
+            bundle: v3.bundle.clone(),
+        },
+    ));
+    a.poll_once().unwrap();
+    assert_eq!(sys.log()[1..], writes(Slot::A));
+}
+
+#[test]
+fn a_trial_that_never_commits_is_rolled_back() {
+    let f = fleet(true);
+    let v2 = build("2");
+    f.upload(&v2);
+    f.send(&f.command(
+        11,
+        Action::Reboot {
+            bundle: Some(v2.bundle.clone()),
+        },
+    ));
+    let sys = FakeSystem::new();
+    let mut a = f.agent(sys.clone());
+    a.poll_once().unwrap();
+    assert_eq!(sys.log().last().unwrap(), "reboot");
+    drop(a);
+
+    // B boots once, hangs before the agent commits it, and is power-cycled:
+    // the try is used up, so U-Boot boots A again.
+    sys.power_on();
+    assert_eq!(sys.booted_slot(), Some(Slot::B));
+    sys.power_on();
+    assert_eq!(sys.booted_slot(), Some(Slot::A));
+
+    let mut a = f.agent(sys.clone());
+    a.poll_once().unwrap();
+    // A, healthy, clears the spent try, and says what happened.
+    assert_eq!(sys.log(), ["bootstate active=a try=-"]);
+    let (seq, what, outcome, detail) = last_result(&a);
+    assert_eq!((seq, what.as_str(), outcome), (11, "boot", Outcome::Failed));
+    assert!(detail.contains("did not come up"), "{detail}");
+    assert!(a.state.trial.is_none());
+}
+
+#[test]
+fn a_trial_boot_commits_only_once_the_lathe_service_answers() {
+    let f = fleet(true);
+    let v2 = build("2");
+    f.upload(&v2);
+    f.send(&f.command(
+        11,
+        Action::Reboot {
+            bundle: Some(v2.bundle.clone()),
+        },
+    ));
+    let sys = FakeSystem::new();
+    f.agent(sys.clone()).poll_once().unwrap();
+    sys.power_on();
+
+    // The new system's lathe service does not answer: not committed.
+    let mut a = f.agent_with(
+        sys.clone(),
+        "dev-token",
+        &f.url,
+        "http://127.0.0.1:9/api/state",
+    );
+    a.poll_once().unwrap();
+    assert!(sys.log().is_empty(), "{:?}", sys.log());
+    assert_eq!(sys.state().active, Slot::A);
+    assert_eq!(last_result(&a).2, Outcome::Deferred);
+
+    // While on trial, nothing may be written over the way back.
+    let v3 = build("3");
+    f.upload(&v3);
+    f.send(&f.command(
+        12,
+        Action::Stage {
+            bundle: v3.bundle.clone(),
+        },
+    ));
+    a.poll_once().unwrap();
+    let r = a.state.results.iter().find(|r| r.seq == 12).unwrap();
+    assert_eq!(r.outcome, Outcome::Failed);
+    assert!(r.detail.contains("not committed"), "{}", r.detail);
+    assert!(sys.log().is_empty(), "{:?}", sys.log());
+    drop(a);
+
+    // Once it answers, the trial commits.
+    let mut a = f.agent(sys.clone());
+    a.poll_once().unwrap();
+    assert_eq!(sys.state().active, Slot::B);
+    assert!(a
+        .state
+        .results
+        .iter()
+        .any(|r| r.seq == 11 && r.what == "boot" && r.outcome == Outcome::Done));
+}
+
+#[test]
+fn a_bad_write_is_caught_on_read_back_and_never_tried() {
+    let f = fleet(true);
+    let v2 = build("2");
+    f.upload(&v2);
+    f.send(&f.command(
+        11,
+        Action::Reboot {
+            bundle: Some(v2.bundle.clone()),
+        },
+    ));
+    let sys = FakeSystem::new();
+    sys.card().corrupt = Some("dtb");
+    let mut a = f.agent(sys.clone());
+    a.poll_once().unwrap();
+    let log = sys.log();
+    assert_eq!(log.last().unwrap(), "invalidate b");
+    assert!(!log
+        .iter()
+        .any(|l| l.starts_with("bootstate") || l == "reboot"));
+    let (seq, _, outcome, detail) = last_result(&a);
+    assert_eq!((seq, outcome), (11, Outcome::Failed));
+    assert!(
+        detail.contains("dtb") && detail.contains("read back"),
+        "{detail}"
+    );
+    assert!(a.state.slot_b.is_none());
+    assert_eq!(sys.state().try_slot, None);
+}
+
+#[test]
+fn a_missing_or_oversized_file_fails_the_stage() {
+    let f = fleet(true);
+    let v2 = build("2");
+    // Not uploaded.
+    f.send(&f.command(
+        11,
+        Action::Stage {
+            bundle: v2.bundle.clone(),
+        },
+    ));
+    let mut big = build("big");
+    big.bundle.files[0].size = ROOTFS_CAPACITY + 1;
+    f.send(&f.command(
+        12,
+        Action::Stage {
+            bundle: big.bundle.clone(),
+        },
+    ));
+    let sys = FakeSystem::new();
+    let mut a = f.agent(sys.clone());
+    a.poll_once().unwrap();
+    let r: Vec<_> = a
+        .state
+        .results
+        .iter()
+        .map(|r| (r.seq, r.outcome, r.detail.clone()))
+        .collect();
+    assert_eq!(r[0].1, Outcome::Failed);
+    assert!(r[0].2.contains("404"), "{}", r[0].2);
+    assert_eq!(r[1].1, Outcome::Failed);
+    assert!(r[1].2.contains("holds"), "{}", r[1].2);
+    assert_eq!(a.state.last_seq, 12);
 }
 
 #[test]
 fn bad_token_gets_401() {
     let f = fleet(true);
     let sys = FakeSystem::new();
-    let a = f.agent_with(sys.clone(), "wrong-token", &f.url, &f.lathe_url);
-    let mut a = a;
+    let mut a = f.agent_with(sys.clone(), "wrong-token", &f.url, &f.lathe_url);
     let e = a.poll_once().unwrap_err();
     assert!(e.contains("401"), "{e}");
     assert!(sys.log().is_empty());
     // A device token cannot publish.
-    let env = f.manifest(1, &top("2"), false);
+    let env = f.manifest(1, &build("2").bundle, false);
     let r = http()
         .put(&format!("{}/api/v1/devices/kd240/manifest", f.url))
         .header("Authorization", "Bearer dev-token")
@@ -377,8 +711,9 @@ fn bad_token_gets_401() {
 fn tampered_manifest_relayed_by_a_server_is_rejected() {
     // The server is not checking signatures here, as a compromised one would not.
     let f = fleet(false);
-    let mut env = f.manifest(10, &top("2"), false);
-    env.payload = env.payload.replace(&top("2"), &top("evil"));
+    let v2 = build("2");
+    let mut env = f.manifest(10, &v2.bundle, true);
+    env.payload = env.payload.replace("kd240-2", "kd240-6");
     f.publish(&env);
     let sys = FakeSystem::new();
     let mut a = f.agent(sys.clone());
@@ -401,7 +736,7 @@ fn order_signed_by_another_key_is_rejected() {
         device: "kd240".into(),
         seq: 5,
         not_after: NOW + 10,
-        action: Action::Reboot { toplevel: None },
+        action: Action::Reboot { bundle: None },
     })));
     let sys = FakeSystem::new();
     let mut a = f.agent(sys.clone());
@@ -411,9 +746,27 @@ fn order_signed_by_another_key_is_rejected() {
 }
 
 #[test]
+fn a_p256_key_signs_orders_end_to_end() {
+    // The card's kind of key, verified on the board by middleware's code.
+    let key = P256SecretKey::generate("emco-fleet-card").unwrap();
+    let public = key.public();
+    let f = fleet_with(Box::new(key), public, true);
+    let v2 = build("2");
+    f.upload(&v2);
+    f.publish(&f.manifest(10, &v2.bundle, true));
+    let sys = FakeSystem::new();
+    let mut a = f.agent(sys.clone());
+    a.poll_once().unwrap();
+    assert_eq!(last_result(&a).2, Outcome::Done);
+    assert_eq!(sys.log(), writes(Slot::B));
+}
+
+#[test]
 fn replayed_manifest_is_rejected() {
     let f = fleet(true);
-    let old = f.manifest(10, &top("2"), true);
+    let v2 = build("2");
+    f.upload(&v2);
+    let old = f.manifest(10, &v2.bundle, true);
     f.publish(&old);
     let sys = FakeSystem::new();
     let mut a = f.agent(sys.clone());
@@ -450,11 +803,11 @@ fn replayed_manifest_is_rejected() {
 #[test]
 fn order_for_another_device_is_rejected() {
     let f = fleet(false);
-    let other = f.key.sign(&Order::Command(Command {
+    let other = f.sign(&Order::Command(Command {
         device: "kd240-b".into(),
         seq: 5,
         not_after: NOW + 10,
-        action: Action::Reboot { toplevel: None },
+        action: Action::Reboot { bundle: None },
     }));
     let evil = evil_server(PollResponse {
         manifest: None,
@@ -469,92 +822,109 @@ fn order_for_another_device_is_rejected() {
 }
 
 #[test]
-fn switch_is_deferred_while_the_lathe_is_busy() {
+fn stage_goes_ahead_while_the_lathe_is_running() {
     let f = fleet(true);
     f.set_run("running");
-    f.send(&f.command(20, Action::Switch { toplevel: top("2") }));
+    let v2 = build("2");
+    f.upload(&v2);
+    f.send(&f.command(
+        20,
+        Action::Stage {
+            bundle: v2.bundle.clone(),
+        },
+    ));
     let sys = FakeSystem::new();
     let mut a = f.agent(sys.clone());
     a.poll_once().unwrap();
-    // Nothing done, nothing used up, reported, still queued.
-    assert!(sys.log().is_empty(), "{:?}", sys.log());
+    assert_eq!(sys.log(), writes(Slot::B));
+    assert_eq!(last_result(&a).2, Outcome::Done);
+}
+
+#[test]
+fn reboot_waits_for_idle_and_does_not_loop() {
+    let f = fleet(true);
+    f.set_run("hold");
+    let v3 = build("3");
+    f.upload(&v3);
+    f.send(&f.command(
+        30,
+        Action::Reboot {
+            bundle: Some(v3.bundle.clone()),
+        },
+    ));
+    let sys = FakeSystem::new();
+    let mut a = f.agent(sys.clone());
+    a.poll_once().unwrap();
+    // Staged (allowed), reboot held back, nothing marked to try.
+    assert_eq!(sys.log(), writes(Slot::B));
     assert_eq!(a.state.last_seq, 0);
-    let (seq, what, outcome, detail) = last_result(&a);
-    assert_eq!(
-        (seq, what.as_str(), outcome),
-        (20, "switch", Outcome::Deferred)
-    );
-    assert!(detail.contains("running"), "{detail}");
-    let d = f.detail();
-    assert_eq!(d.summary.pending_commands.len(), 1);
-    assert_eq!(
-        d.summary
-            .latest
-            .unwrap()
-            .telemetry
-            .results
-            .last()
-            .unwrap()
-            .outcome,
-        Outcome::Deferred
-    );
+    let (_, _, outcome, detail) = last_result(&a);
+    assert_eq!(outcome, Outcome::Deferred);
+    assert!(detail.contains("hold"), "{detail}");
 
     // Every busy state defers.
-    for busy in ["hold", "alarm", "homing", "toolchange"] {
+    for busy in ["running", "alarm", "homing", "toolchange"] {
         f.set_run(busy);
         a.poll_once().unwrap();
-        assert!(sys.log().is_empty(), "{busy}");
+        assert!(!sys.log().iter().any(|l| l == "reboot"), "{busy}");
         assert!(last_result(&a).3.contains(busy));
     }
+    // Nothing was written again while it waited.
+    assert_eq!(sys.log().len(), FILES.len());
 
-    // Idle: it goes ahead, and the queue drains.
     f.set_run("idle");
     a.poll_once().unwrap();
     assert_eq!(
-        sys.log(),
-        [
-            format!("realise {}", top("2")),
-            format!("set-profile {}", top("2")),
-            format!("activate switch {}", top("2"))
-        ]
+        sys.log()[FILES.len()..],
+        ["bootstate active=a try=b", "reboot"]
     );
-    assert_eq!(a.state.last_seq, 20);
-    assert_eq!(last_result(&a).2, Outcome::Done);
+    assert_eq!(a.state.last_seq, 30);
+    drop(a);
+
+    // "After the reboot": the server still had the order queued, but the
+    // board has used it up.
+    sys.power_on();
+    let mut a = f.agent(sys.clone());
+    assert_eq!(a.state.last_seq, 30);
+    a.poll_once().unwrap();
+    assert!(!sys.log().iter().any(|l| l == "reboot"), "{:?}", sys.log());
     assert!(f.detail().summary.pending_commands.is_empty());
 }
 
 #[test]
-fn switch_rechecks_immediately_before_activating() {
+fn reboot_rechecks_immediately_before_acting() {
     let f = fleet(true);
-    f.send(&f.command(20, Action::Switch { toplevel: top("2") }));
-    let mut sys = FakeSystem::new();
-    sys.busy_after_profile = Some((f.run.clone(), "running".into()));
+    let v2 = build("2");
+    f.upload(&v2);
+    f.send(&f.command(
+        11,
+        Action::Reboot {
+            bundle: Some(v2.bundle.clone()),
+        },
+    ));
+    let sys = FakeSystem::new();
+    sys.card().busy_after_bootstate = Some((f.run.clone(), "running".into()));
     let mut a = f.agent(sys.clone());
     a.poll_once().unwrap();
-    // Idle when taken up, busy by the time it would activate: staged only.
+    // Idle when taken up, busy by the time it would reboot: the try is
+    // taken back and the order stays.
     assert_eq!(
-        sys.log(),
-        [
-            format!("realise {}", top("2")),
-            format!("set-profile {}", top("2")),
-            format!("activate boot {}", top("2"))
-        ]
+        sys.log()[FILES.len()..],
+        ["bootstate active=a try=b", "bootstate active=a try=-"]
     );
+    assert_eq!(sys.state().pending_try(), None);
     assert_eq!(a.state.last_seq, 0);
+    assert!(a.state.trial.is_none());
     let (_, _, outcome, detail) = last_result(&a);
     assert_eq!(outcome, Outcome::Deferred);
-    assert!(
-        detail.contains("staged") && detail.contains("running"),
-        "{detail}"
-    );
+    assert!(detail.contains("running"), "{detail}");
 }
 
 #[test]
-fn disconnected_lathe_allows_a_switch_but_an_unreachable_one_does_not() {
+fn disconnected_lathe_allows_a_reboot_but_an_unreachable_one_does_not() {
     let f = fleet(true);
-    f.send(&f.command(20, Action::Switch { toplevel: top("2") }));
+    f.send(&f.command(20, Action::Reboot { bundle: None }));
     let sys = FakeSystem::new();
-    // Nothing listens on port 9 here.
     let mut a = f.agent_with(
         sys.clone(),
         "dev-token",
@@ -573,132 +943,42 @@ fn disconnected_lathe_allows_a_switch_but_an_unreachable_one_does_not() {
     f.set_run("disconnected");
     let mut a = f.agent(sys.clone());
     a.poll_once().unwrap();
-    assert!(sys.log().last().unwrap().starts_with("activate switch"));
+    // A plain reboot: no slot change.
+    assert_eq!(sys.log(), ["reboot"]);
 }
 
 #[test]
-fn stage_goes_ahead_while_the_lathe_is_running() {
+fn expired_and_bad_bundles_are_used_up() {
     let f = fleet(true);
-    f.set_run("running");
-    f.send(&f.command(20, Action::Stage { toplevel: top("2") }));
-    let sys = FakeSystem::new();
-    let mut a = f.agent(sys.clone());
-    a.poll_once().unwrap();
-    assert_eq!(
-        sys.log().last().unwrap(),
-        &format!("activate boot {}", top("2"))
-    );
-    assert_eq!(last_result(&a).2, Outcome::Done);
-}
-
-#[test]
-fn reboot_waits_for_idle_and_does_not_loop() {
-    let f = fleet(true);
-    f.set_run("hold");
-    f.send(&f.command(
-        30,
-        Action::Reboot {
-            toplevel: Some(top("3")),
-        },
-    ));
-    let sys = FakeSystem::new();
-    let mut a = f.agent(sys.clone());
-    a.poll_once().unwrap();
-    // Staged (allowed), reboot held back.
-    assert_eq!(
-        sys.log().last().unwrap(),
-        &format!("activate boot {}", top("3"))
-    );
-    assert!(!sys.log().contains(&"reboot".to_string()));
-    assert_eq!(last_result(&a).2, Outcome::Deferred);
-
-    f.set_run("idle");
-    a.poll_once().unwrap();
-    assert_eq!(sys.log().last().unwrap(), "reboot");
-    assert_eq!(a.state.last_seq, 30);
-    drop(a);
-
-    // "After the reboot": a fresh agent on the same state directory. The
-    // server still had the order queued, but the board has used it up.
-    let sys2 = FakeSystem::new();
-    let mut a = f.agent(sys2.clone());
-    assert_eq!(a.state.last_seq, 30);
-    a.poll_once().unwrap();
-    assert!(sys2.log().is_empty(), "rebooted again: {:?}", sys2.log());
-    assert!(f.detail().summary.pending_commands.is_empty());
-}
-
-#[test]
-fn expired_and_bad_toplevels_are_used_up() {
-    let f = fleet(true);
-    let expired = f.key.sign(&Order::Command(Command {
+    f.send(&f.sign(&Order::Command(Command {
         device: "kd240".into(),
         seq: 40,
         not_after: NOW - 1,
-        action: Action::Reboot { toplevel: None },
-    }));
-    f.send(&expired);
-    let wrong_arch = format!("/nix/store/{HASH}-nixos-system-kd240-x86");
+        action: Action::Reboot { bundle: None },
+    })));
+    let mut wrong_class = build("2").bundle;
+    wrong_class.class = "kr260".into();
     f.send(&f.command(
         41,
         Action::Stage {
-            toplevel: wrong_arch.clone(),
+            bundle: wrong_class,
         },
     ));
-    f.send(&f.command(
-        42,
-        Action::Stage {
-            toplevel: top("missing"),
-        },
-    ));
+    let mut short = build("2").bundle;
+    short.files.pop();
+    f.send(&f.command(42, Action::Stage { bundle: short }));
     let sys = FakeSystem::new();
     let mut a = f.agent(sys.clone());
     a.poll_once().unwrap();
-    // 40 refused unread; 41 fetched but refused as the wrong system; 42 failed to fetch.
-    assert_eq!(
-        sys.log(),
-        [
-            format!("realise {wrong_arch}"),
-            format!("realise {}", top("missing"))
-        ]
-    );
+    assert!(sys.log().is_empty(), "{:?}", sys.log());
     let outcomes: Vec<_> = a.state.results.iter().map(|r| (r.seq, r.outcome)).collect();
     assert_eq!(
         outcomes,
         [
             (40, Outcome::Rejected),
-            (41, Outcome::Failed),
-            (42, Outcome::Failed)
+            (41, Outcome::Rejected),
+            (42, Outcome::Rejected)
         ]
     );
     assert_eq!(a.state.last_seq, 42);
-}
-
-#[test]
-fn the_running_system_is_kept_when_it_would_drop_off_the_menu() {
-    let f = fleet(true);
-    f.send(&f.command(50, Action::Stage { toplevel: top("9") }));
-    let sys = FakeSystem::new();
-    {
-        // Rolled back at the U-Boot menu to generation 1 of 6.
-        let mut g = sys.gens.lock().unwrap();
-        for n in 2..=6 {
-            g.push(Generation {
-                number: n,
-                target: top(&n.to_string()),
-                age_s: 60,
-            });
-        }
-    }
-    let mut a = f.agent(sys.clone());
-    a.poll_once().unwrap();
-    assert_eq!(
-        sys.log(),
-        [
-            format!("realise {}", top("9")),
-            format!("set-profile {}", top("1")),
-            format!("set-profile {}", top("9")),
-            format!("activate boot {}", top("9")),
-        ]
-    );
 }

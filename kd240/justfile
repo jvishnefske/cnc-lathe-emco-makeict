@@ -62,3 +62,8 @@ dev-middleware *args:
 # Move the flake's middleware pin to that checkout's branch head.
 bump-middleware:
     cd .. && nix flake update middleware
+
+# A release bundle for the A/B card (fleet/README.md, "Publish a release").
+bundle:
+    nix build ..#kd240-bundle -L -o result-bundle
+    @cat result-bundle/bundle.json

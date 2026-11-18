@@ -43,7 +43,24 @@
         # wasm-bindgen-cli 25.11 lacks). wasm32 is the same on every
         # platform, so the board's aarch64 service embeds this build. The
         # host is x86-64 Linux already, for the cross-compiled kernel.
-        specialArgs.kd240Egui = self.packages.x86_64-linux.kd240-egui;
+        specialArgs = {
+          kd240Egui = self.packages.x86_64-linux.kd240-egui;
+          middlewareSrc = middleware.outPath;
+        };
+      };
+
+      # The same system on the A/B card layout (kd240/nix/ab.nix): a raw
+      # squashfs store per slot, U-Boot trying a new slot once and falling
+      # back, and the fleet agent writing the inactive slot. Its release
+      # bundle is packages.x86_64-linux.kd240-bundle; its card image
+      #   nix build .#nixosConfigurations.kd240-ab.config.system.build.abImage
+      # NOT YET BOOTED ON A BOARD.
+      nixosConfigurations.kd240-ab = nixpkgs-linuxcnc.lib.nixosSystem {
+        modules = [ ./kd240/nix/configuration.nix ./kd240/nix/ab.nix ];
+        specialArgs = {
+          kd240Egui = self.packages.x86_64-linux.kd240-egui;
+          middlewareSrc = middleware.outPath;
+        };
       };
     } //
     flake-utils.lib.eachDefaultSystem (system:
@@ -105,11 +122,22 @@
           wasm-bindgen-cli = pkgs.callPackage ./kd240/nix/wasm-bindgen-cli.nix { };
         };
         emco-kd240 = pkgs.callPackage ./kd240/nix/package.nix { egui = kd240-egui; };
+        # The fleet tools for this machine (the emco-fleet CLI, the server).
+        emco-fleet = pkgs.callPackage ./kd240/fleet/nix/package.nix { middlewareSrc = middleware.outPath; };
       in
       {
         packages = {
-          inherit linuxcnc yapps2 kd240-egui emco-kd240;
+          inherit linuxcnc yapps2 kd240-egui emco-kd240 emco-fleet;
+          # The fleet server's OCI image (kd240/fleet/README.md, "Deploy").
+          emco-fleet-image = pkgs.callPackage ./kd240/fleet/nix/image.nix { middlewareSrc = middleware.outPath; };
           default = linuxcnc;
+        } // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          # One A/B release for the KD240 (`emco-bundle-1`, kd240/fleet/
+          # proto/src/bundle.rs): rootfs.squashfs, Image, initrd, dtb,
+          # cmdline and bundle.json, for `emco-fleet publish --bundle`.
+          # Built on an x86-64 host, like the system (its kernel is cross-
+          # compiled).
+          kd240-bundle = self.nixosConfigurations.kd240-ab.config.system.build.bundle;
         };
 
         checks.emco-rules = pkgs.runCommand "emco-rules-tests" { nativeBuildInputs = [ pkgs.python3 ]; } ''

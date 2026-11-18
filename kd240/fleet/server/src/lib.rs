@@ -5,8 +5,10 @@
 //! stage/switch/reboot commands). It never holds the signing key, so a
 //! compromised server can withhold or replay orders but cannot make one:
 //! the board verifies every signature, its own device id and a persisted
-//! sequence number. It also serves a static Nix binary cache at `/cache/`,
-//! whose integrity rests on Nix's own signatures, not on this server.
+//! sequence number. It also stores the release bundles' files by SHA-256
+//! (`<data>/files/<sha256>`); their integrity rests on the signed bundle
+//! that names them, which the board checks as it writes them, not on this
+//! server.
 //!
 //! | Route | Who | |
 //! |---|---|---|
@@ -16,7 +18,8 @@
 //! | `DELETE /api/v1/devices/{id}/commands` | admin | drop the queued commands |
 //! | `GET /api/v1/devices` | admin | every device's summary |
 //! | `GET /api/v1/devices/{id}` | admin | one device, with its history |
-//! | `GET /cache/…` | anyone | the binary cache (`nix-cache-info`, `*.narinfo`, `nar/`) |
+//! | `PUT /api/v1/files/{sha256}` | admin | upload a bundle file; refused unless its SHA-256 matches |
+//! | `GET /api/v1/files/{sha256}` | device, admin | download one |
 //! | `GET /healthz` | anyone | `ok` |
 //!
 //! Tokens are bearer tokens, compared in constant time (`emco_fleet_proto::token`).
@@ -27,11 +30,13 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use axum::extract::{DefaultBodyLimit, Path as UrlPath, State};
+use axum::body::Body;
+use axum::extract::{DefaultBodyLimit, Path as UrlPath, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
+use emco_fleet_proto::bundle::is_sha256_hex;
 use emco_fleet_proto::keys::{Envelope, PublicKey};
 use emco_fleet_proto::msg::{
     DeviceDetail, DeviceSummary, Order, PollRequest, PollResponse, Sample,
@@ -53,9 +58,6 @@ pub struct Config {
     /// Directory for state.json.
     #[arg(long, env = "FLEET_DATA_DIR", default_value = "/data")]
     pub data_dir: PathBuf,
-    /// The static binary cache served at /cache/ (made with `nix copy --to file://…`).
-    #[arg(long, env = "FLEET_CACHE_DIR", default_value = "/cache")]
-    pub cache_dir: PathBuf,
     /// One admin token per line (raw, or `sha256:<hex>`); `#` comments.
     #[arg(long, env = "FLEET_ADMIN_TOKEN_FILE")]
     pub admin_token_file: PathBuf,
@@ -152,8 +154,8 @@ impl App {
                 .map_err(|e| format!("{}: {e}", p.display()))?,
             None => Vec::new(),
         };
-        std::fs::create_dir_all(&cfg.data_dir)
-            .map_err(|e| format!("{}: {e}", cfg.data_dir.display()))?;
+        let files = cfg.data_dir.join("files");
+        std::fs::create_dir_all(&files).map_err(|e| format!("{}: {e}", files.display()))?;
         let state = cfg.data_dir.join("state.json");
         let data = match std::fs::read(&state) {
             Ok(b) => serde_json::from_slice(&b).map_err(|e| format!("{}: {e}", state.display()))?,
@@ -181,6 +183,10 @@ impl App {
             .map_err(|e| Error::internal(format!("{}: {e}", tmp.display())))?;
         std::fs::rename(&tmp, &path)
             .map_err(|e| Error::internal(format!("{}: {e}", path.display())))
+    }
+
+    fn files_dir(&self) -> PathBuf {
+        self.cfg.data_dir.join("files")
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Data> {
@@ -240,11 +246,29 @@ fn require_device(app: &App, headers: &HeaderMap, id: &str) -> Result<(), Error>
     ok.then_some(()).ok_or_else(Error::unauthorized)
 }
 
+/// Any device, or an admin: bundle files are the same for every board.
+fn require_reader(app: &App, headers: &HeaderMap) -> Result<(), Error> {
+    let tok = bearer(headers).ok_or_else(Error::unauthorized)?;
+    let ok = app.admin.iter().fold(false, |acc, h| h.matches(tok) | acc)
+        | app
+            .devices
+            .iter()
+            .fold(false, |acc, (_, h)| h.matches(tok) | acc);
+    ok.then_some(()).ok_or_else(Error::unauthorized)
+}
+
 // --------------------------------------------------------------- routes
 
 pub fn router(app: Shared) -> Router {
-    let cache = tower_http::services::ServeDir::new(&app.cfg.cache_dir);
-    Router::new()
+    // A root file system is hundreds of MiB: no body limit on the upload,
+    // which streams to disk and is checked against its name.
+    let files = Router::new().route(
+        "/api/v1/files/{sha}",
+        put(put_file)
+            .get(get_file)
+            .layer(DefaultBodyLimit::disable()),
+    );
+    let api = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/v1/devices", get(list_devices))
         .route("/api/v1/devices/{id}", get(device_detail))
@@ -254,9 +278,92 @@ pub fn router(app: Shared) -> Router {
             "/api/v1/devices/{id}/commands",
             post(post_command).delete(clear_commands),
         )
-        .nest_service("/cache", cache)
-        .layer(DefaultBodyLimit::max(64 * 1024))
-        .with_state(app)
+        .layer(DefaultBodyLimit::max(64 * 1024));
+    api.merge(files).with_state(app)
+}
+
+fn file_name(sha: &str) -> Result<&str, Error> {
+    if is_sha256_hex(sha) {
+        Ok(sha)
+    } else {
+        Err(Error::new(
+            StatusCode::BAD_REQUEST,
+            "not a lowercase SHA-256",
+        ))
+    }
+}
+
+async fn put_file(
+    State(app): State<Shared>,
+    headers: HeaderMap,
+    UrlPath(sha): UrlPath<String>,
+    body: Body,
+) -> Result<StatusCode, Error> {
+    use http_body_util::BodyExt;
+    use sha2::{Digest, Sha256};
+    use tokio::io::AsyncWriteExt;
+
+    require_admin(&app, &headers)?;
+    let name = file_name(&sha)?;
+    let path = app.files_dir().join(name);
+    if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    let mut rnd = [0u8; 8];
+    getrandom::fill(&mut rnd).map_err(|e| Error::internal(e.to_string()))?;
+    let tmp = app
+        .files_dir()
+        .join(format!(".{name}.{}", emco_fleet_proto::keys::hex(&rnd)));
+    let io = |e: std::io::Error| Error::internal(format!("{}: {e}", tmp.display()));
+    let mut f = tokio::fs::File::create(&tmp).await.map_err(io)?;
+    let mut hash = Sha256::new();
+    let mut body = body;
+    let result: Result<(), Error> = async {
+        while let Some(frame) = body.frame().await {
+            let frame =
+                frame.map_err(|e| Error::new(StatusCode::BAD_REQUEST, format!("body: {e}")))?;
+            if let Some(data) = frame.data_ref() {
+                hash.update(data);
+                f.write_all(data).await.map_err(io)?;
+            }
+        }
+        f.sync_all().await.map_err(io)?;
+        let got = emco_fleet_proto::keys::hex(&hash.finalize_reset());
+        if got != name {
+            return Err(Error::new(
+                StatusCode::BAD_REQUEST,
+                format!("the body's SHA-256 is {got}"),
+            ));
+        }
+        tokio::fs::rename(&tmp, &path)
+            .await
+            .map_err(|e| Error::internal(format!("{}: {e}", path.display())))
+    }
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&tmp).await;
+    }
+    result.map(|()| StatusCode::CREATED)
+}
+
+async fn get_file(
+    State(app): State<Shared>,
+    headers: HeaderMap,
+    UrlPath(sha): UrlPath<String>,
+    req: Request,
+) -> Result<Response, Error> {
+    use tower::ServiceExt;
+
+    require_reader(&app, &headers)?;
+    let path = app.files_dir().join(file_name(&sha)?);
+    if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+        return Err(Error::new(StatusCode::NOT_FOUND, "no such file"));
+    }
+    let resp = tower_http::services::ServeFile::new(path)
+        .oneshot(req)
+        .await
+        .map_err(|e| Error::internal(e.to_string()))?;
+    Ok(resp.map(Body::new))
 }
 
 fn summary(id: &str, d: Option<&DeviceData>) -> DeviceSummary {

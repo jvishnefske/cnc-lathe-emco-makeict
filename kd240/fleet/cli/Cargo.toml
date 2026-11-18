@@ -1,6 +1,6 @@
 [package]
 name = "emco-fleet"
-description = "The build host's fleet tool: make keys and tokens, sign and publish update manifests and commands, show devices. The signing key never leaves this machine."
+description = "The build host's fleet tool: make keys and tokens, sign (with a PKCS#11 card through mwctl, or a software key) and publish release bundles and commands, show devices. The signing key never leaves this machine."
 edition.workspace = true
 license.workspace = true
 version.workspace = true
@@ -10,3 +10,12 @@ emco-fleet-proto.workspace = true
 serde_json.workspace = true
 clap.workspace = true
 ureq.workspace = true
+sha2 = "0.10"
+# middleware's host tool, as a library: its Ed25519 seeds and its PKCS#11
+# signer, so one hardware key signs node payloads and KD240 orders.
+mwctl.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+middleware.workspace = true
+cryptoki = "0.10"

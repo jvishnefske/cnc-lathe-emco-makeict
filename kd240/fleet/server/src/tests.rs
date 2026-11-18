@@ -10,6 +10,24 @@ use tower::ServiceExt;
 
 const TOP: &str = "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-kd240-25.11";
 
+fn bundle() -> emco_fleet_proto::bundle::Bundle {
+    use emco_fleet_proto::bundle::{Bundle, BundleFile, FILES, FORMAT};
+    Bundle {
+        format: FORMAT.into(),
+        class: "kd240".into(),
+        version: TOP.into(),
+        created: 1,
+        files: FILES
+            .iter()
+            .map(|n| BundleFile {
+                name: n.to_string(),
+                size: 10,
+                sha256: "a".repeat(64),
+            })
+            .collect(),
+    }
+}
+
 struct Fixture {
     _dir: tempfile::TempDir,
     cfg: Config,
@@ -29,16 +47,9 @@ fn fixture(trusted: bool) -> Fixture {
     )
     .unwrap();
     std::fs::write(dir.path().join("keys"), key.public().to_text()).unwrap();
-    std::fs::create_dir_all(dir.path().join("cache")).unwrap();
-    std::fs::write(
-        dir.path().join("cache/nix-cache-info"),
-        "StoreDir: /nix/store\n",
-    )
-    .unwrap();
     let cfg = Config {
         listen: String::new(),
         data_dir: dir.path().join("data"),
-        cache_dir: dir.path().join("cache"),
         admin_token_file: dir.path().join("admin"),
         device_tokens_file: dir.path().join("devices"),
         trusted_keys_file: trusted.then(|| dir.path().join("keys")),
@@ -80,9 +91,7 @@ fn manifest(key: &SecretKey, seq: u64) -> Envelope {
     key.sign(&Order::Manifest(Manifest {
         device: "kd240".into(),
         seq,
-        host: "kd240".into(),
-        system: "aarch64-linux".into(),
-        toplevel: TOP.into(),
+        bundle: bundle(),
         stage: false,
         created: 1,
         note: String::new(),
@@ -94,7 +103,7 @@ fn command(key: &SecretKey, seq: u64) -> Envelope {
         device: "kd240".into(),
         seq,
         not_after: u64::MAX,
-        action: Action::Reboot { toplevel: None },
+        action: Action::Reboot { bundle: None },
     }))
 }
 
@@ -397,18 +406,74 @@ async fn history_is_bounded_and_state_persists() {
 }
 
 #[tokio::test]
-async fn serves_the_cache_without_a_token() {
+async fn bundle_files_are_stored_by_their_hash() {
+    use sha2::{Digest, Sha256};
     let f = fixture(false);
     let app = App::open(f.cfg.clone()).unwrap();
-    let (code, body) = call(&app, "GET", "/cache/nix-cache-info", None, None).await;
+    let data = "the kernel".to_string();
+    let sha = emco_fleet_proto::keys::hex(&Sha256::digest(&data));
+    let uri = format!("/api/v1/files/{sha}");
+
+    // Only an admin uploads, and only bytes that match the name.
     assert_eq!(
-        (code, body.as_str()),
-        (StatusCode::OK, "StoreDir: /nix/store\n")
+        call(&app, "PUT", &uri, Some("dev-token"), Some(data.clone()))
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let wrong = format!("/api/v1/files/{}", "b".repeat(64));
+    let (code, body) = call(&app, "PUT", &wrong, Some("admin-token"), Some(data.clone())).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains(&sha), "{body}");
+    assert_eq!(
+        call(&app, "GET", &wrong, Some("dev-token"), None).await.0,
+        StatusCode::NOT_FOUND,
+        "a refused upload leaves nothing behind"
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(f.cfg.data_dir.join("files"))
+        .unwrap()
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+
+    assert_eq!(
+        call(&app, "PUT", &uri, Some("admin-token"), Some(data.clone()))
+            .await
+            .0,
+        StatusCode::CREATED
     );
     assert_eq!(
-        call(&app, "GET", "/cache/../admin", None, None).await.0,
-        StatusCode::NOT_FOUND
+        call(&app, "PUT", &uri, Some("admin-token"), Some(data.clone()))
+            .await
+            .0,
+        StatusCode::NO_CONTENT,
+        "already there"
     );
+
+    // Any device (or an admin) downloads; nobody else.
+    for tok in ["dev-token", "other-token", "admin-token"] {
+        assert_eq!(
+            call(&app, "GET", &uri, Some(tok), None).await,
+            (StatusCode::OK, data.clone()),
+            "{tok}"
+        );
+    }
+    assert_eq!(
+        call(&app, "GET", &uri, None, None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    for bad in ["../admin", "ABC", &"A".repeat(64)] {
+        let code = call(
+            &app,
+            "GET",
+            &format!("/api/v1/files/{bad}"),
+            Some("dev-token"),
+            None,
+        )
+        .await
+        .0;
+        assert!(code.is_client_error(), "{bad}: {code}");
+        assert_ne!(code, StatusCode::OK);
+    }
     assert_eq!(
         call(&app, "GET", "/healthz", None, None).await.0,
         StatusCode::OK

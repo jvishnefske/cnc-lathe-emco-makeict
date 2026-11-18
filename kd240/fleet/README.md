@@ -1,214 +1,239 @@
-# kd240/fleet: telemetry and signed software updates for the KD240
+# kd240/fleet: telemetry and signed A/B updates for the KD240
 
 A small server and a board agent. The board **polls** the server over
 outbound HTTPS (it has no inbound port for this). It reports telemetry, and
-it fetches **owner-signed** orders: update manifests and `stage`, `switch` and
-`reboot` commands. The system closure itself comes from a Nix binary cache
-the board trusts. The server stores and relays. It never holds a signing
-key.
+it fetches **owner-signed** orders: release manifests, and `stage` and
+`reboot` commands. A release is a **bundle**: one A/B slot's worth of files,
+built by `nix build .#kd240-bundle`. The agent writes it into the slot the
+board is not running from, reads it back, and on a `reboot` order has U-Boot
+try it once. The new system commits itself once healthy; if it never does,
+the next reset boots the old slot. The server stores and relays. It never
+holds a signing key.
 
 > **No machine commands, by design.** There's no G-code, no jog, no run, and
 > nothing for the RS-485 bus. The agent's only contact with the lathe
-> service is reading `GET /api/state`'s `session.run`, for the interlock.
-> The message types can't express anything else: `msg::Action` has three
-> variants, and unknown ones fail to parse.
+> service is reading `GET /api/state`'s `session.run`, for the interlock and
+> the health check. `msg::Action` has two variants, `stage` and `reboot`,
+> and unknown ones fail to parse.
 
 ```
-  build host                          owner's host (docker, Traefik)           KD240 (NixOS)
-  ──────────                          ──────────────────────────────           ─────────────
-  nix build …toplevel                 emco-fleet-server                        emco-fleet-agent (timer, root)
-  nix copy --to file://…  ──rsync──►  /cache/  (static binary cache)  ◄─HTTPS─ nix-store --realise (Nix checks
-  emco-fleet publish/command ─HTTPS─► /api/v1  stores signed envelopes ◄─HTTPS─  the cache signature)
-    (ed25519 key stays here)          + telemetry, bounded history     poll    verifies order signature, device,
-                                                                               seq, expiry, toplevel; interlock
-                                                                               on GET 127.0.0.1:8080/api/state
+  build host                             owner's host (docker, Traefik)        KD240 (NixOS, A/B card)
+  ──────────                             ──────────────────────────────        ───────────────────────
+  nix build .#kd240-bundle               emco-fleet-server                     emco-fleet-agent (timer, root)
+  emco-fleet publish ──HTTPS──►  /api/v1/files/<sha256>  ◄──HTTPS── download into the inactive slot,
+    (signs with the card via mwctl,      /api/v1/devices/…        poll      check size + SHA-256, read back;
+     or a software key)                  signed envelopes,                  verify order (middleware trust),
+                                         telemetry, history                 interlock on GET :8080/api/state
 ```
+
+## Signing: middleware's keys
+
+The order signature is **middleware's** (`middleware::loader::trust`): the
+same key types (Ed25519, or ECDSA P-256 as raw `r ‖ s`) and the same
+`verify_signature` that check a signed WASM payload on a node. The CLI signs
+through **mwctl**'s signers, so **one hardware key** (the owner's smart
+card, a TPM, anything PKCS#11) signs both middleware payloads
+(`mwctl upload --pkcs11 LABEL …`) and KD240 orders (`emco-fleet --pkcs11 LABEL`).
+A software ed25519 key (`emco-fleet keygen`) still works, for tests and for
+a fleet without a card.
+
+What stays the fleet's own is the domain: a signature covers
+`"emco-fleet order v1\n" ‖ payload`, so a signature this key made over a
+payload commit (`mw-payload-v1\0…`) can never be passed off as an order,
+nor the reverse. The board's trusted keys are text, `<name>:<base64>`
+(ed25519) or `<name>:p256:<base64 SPKI>`, and the key id is the SPKI's
+SHA-256 (`emco-fleet pubkey` prints both), as `openssl pkey -pubin -outform
+der | sha256sum` gives for the card's certificate.
 
 ## Trust model
 
-* **Orders are signed offline.** Every manifest and command is an ed25519
-  signature, made by `emco-fleet` on the build host, over
-  `"emco-fleet order v1\n" ‖ payload`. The server stores the envelope as it
-  came. The board verifies it against `trustedKeys`, then checks its own
-  device id, a sequence number above the last one it accepted (persisted in
-  `/var/lib/emco-fleet-agent/state.json`, so a replay is refused), the
-  command's expiry (`not_after`, default 1 h), and the toplevel. Signed
-  payloads reject unknown fields, so a restriction added by a newer signer
-  can't be silently ignored by an older board.
-* **The toplevel must be a NixOS system for this host.** The path must have
-  the form `/nix/store/<hash>-nixos-system-<host>-…`. It is never a `.drv`,
-  because realising one would build it. After the fetch, its `system` must
-  be `aarch64-linux`, its `etc/hostname` must be the host, and it must have
-  `bin/switch-to-configuration`, `init` and `nixos-version`.
-* **Closure integrity is Nix's.** The cache is signed with a
-  `nix-store --generate-binary-cache-key` key, and the board has that key in
-  `trusted-public-keys` (`require-sigs` stays on). The server's `/cache/` is
-  plain static files.
-* **A compromised server** can withhold orders, replay them (refused), or
-  serve junk (refused). It can also delay a command until it expires, or
-  read the telemetry. It cannot make the board run anything the owner didn't
-  sign. That takes **both** keys, the order key and the cache key. Both stay
-  on the build host.
-* **Tokens.** Each device has a bearer token for its own poll endpoint
-  only. A separate admin token covers publishing and reading. The server
+* **Orders are signed offline.** The server stores the envelope as it came.
+  The board verifies it against `trustedKeys`, then checks its own device
+  id, a sequence number above the last one it accepted (persisted in
+  `/var/lib/emco-fleet-agent/state.json`, so a replay is refused), a
+  command's expiry (`not_after`, default 1 h), and the bundle: format
+  `emco-bundle-1`, this device class, exactly `rootfs.squashfs`, `Image`,
+  `initrd`, `dtb`, `cmdline` in that order, each with a size and SHA-256.
+  Signed payloads reject unknown fields, so a restriction added by a newer
+  signer can't be silently ignored by an older board.
+* **File integrity is the signed bundle's.** The server keeps files by
+  SHA-256 and checks each upload against its name, but the board does not
+  rely on that: it hashes every file as it writes it, refuses one that is
+  longer, shorter or different, and then reads the whole slot back from the
+  card (page cache dropped) and checks it again.
+* **A compromised server** can withhold orders, replay them (refused),
+  serve junk files (refused, the slot is invalidated), delay a command until
+  it expires, or read the telemetry. It cannot make the board boot anything
+  the owner didn't sign.
+* **Tokens.** Each device has a bearer token for its own poll endpoint and
+  for downloading bundle files (which are the same for every board). A
+  separate admin token covers publishing, uploading and reading. The server
   keeps tokens as `sha256:<hex>`, or hashes raw tokens on load, and compares
-  them in constant time. Secrets live only in files named by options or env.
-  None are in the repository or the Nix store.
+  them in constant time.
 
-## The safety interlock (board side)
+## The slots and the interlock (board side)
 
-The policy is in `proto/src/policy.rs`, as pure functions with unit tests.
-`agent/src/lib.rs` carries it out, and `agent/tests/end_to_end.rs` checks it
-end to end.
+The policy is in `proto/src/policy.rs` and the boot-state format in
+`proto/src/bootstate.rs`, as pure functions with unit tests.
+`agent/src/lib.rs` carries them out, and `agent/tests/end_to_end.rs` checks
+them end to end against a fake card that also plays U-Boot's part.
 
 | Step | Allowed when | |
 |---|---|---|
-| fetch (`nix-store --realise`) | always | changes nothing |
-| `stage` (`nix-env -p /nix/var/nix/profiles/system --set` + `switch-to-configuration boot`) | always | takes effect at the next boot only |
-| `switch` (`switch-to-configuration switch`) | `run` is `idle` or `disconnected` | checked when taken up, and **again immediately before activating** |
-| `reboot` (`systemctl reboot`, optionally staging first) | `run` is `idle` or `disconnected` | checked, then saved and reported, then **checked again immediately before** |
+| download and write the inactive slot (`stage`, or a manifest with `--stage`) | always, while this boot is committed | nothing running uses that slot |
+| `reboot` with a bundle | `run` is `idle` or `disconnected` | stage it (or re-check it if it is there), mark its slot to be tried once, report, **check again immediately before**, `systemctl reboot` |
+| `reboot` without one | the same | the committed slot boots again |
+| commit a trial boot | the lathe service answers `GET /api/state` | `ab_active` becomes the booted slot |
 
+* **The only slot written is the other one**, and only while this boot is
+  the committed one (`policy::stage_target`). During a trial boot the other
+  slot is the way back, so staging is refused until the trial commits.
+* **The boot state** is two 512-byte copies in the gap before partition 1
+  (LBA 4096 and 6144), each a CRC-32 and U-Boot `env export -t` text. A
+  writer, U-Boot or the agent, always overwrites the older copy, so a write
+  cut by a power loss leaves the previous state readable (tested at every
+  byte). U-Boot counts a try down **before** booting it, so a hang anywhere
+  later means the next reset boots the committed slot.
 * If the service is busy (`running`, `hold`, `alarm`, `homing`,
-  `toolchange`, or anything unknown) or **unreachable**, switch and reboot
-  are **deferred**. Deferred means reported (`Outcome::Deferred`) and left
-  queued. The agent retries at the next poll until the command expires, and
-  never forces it. Nothing queued after a deferred order runs first. If the
-  second check fails after the profile was already set, the switch becomes a
-  stage, so the boot menu agrees with the profile, and is reported as
-  deferred.
-* **The previous generation is kept.** Before a new generation is made
-  (`policy::plan_profile`), the running system is re-recorded as a fresh
-  generation if it is not among the newest four (the boot menu shows five)
-  or if its generation is more than 7 days old (the weekly GC deletes after
-  30). So it stays selectable in the U-Boot menu.
-* **Never** the QSPI, the U-Boot environment, or the FAT partition. The
-  executor (`agent/src/system.rs`) runs exactly `nix-store`, `nix-env`,
-  `systemd-run` (to run `switch-to-configuration`) and `systemctl reboot`. A
-  test reads that file and fails if it spawns anything else or names the
-  boot-firmware tools. The NixOS unit also gives the process no devices
-  (`PrivateDevices`), no `/boot/firmware`, and a read-only `/`.
+  `toolchange`, or anything unknown) or **unreachable**, a reboot is
+  **deferred**: reported (`Outcome::Deferred`), left queued, retried at the
+  next poll until it expires, never forced. Nothing queued after it runs
+  first. If the second check fails after the try was marked, the mark is
+  taken back.
 * **A reboot can't loop.** The order is used up on disk before the reboot.
   The report just before it still gives the server the previous sequence
   number, so if the last check defers, the order stays queued.
-* A `switch` is at most once. If activation restarts the agent, the order is
-  already used up, and the next telemetry shows the new `current_system`.
-* Failed orders (fetch failed, wrong system) are used up, not retried. Sign
-  a new one.
+* After the reboot the agent reports the trial's outcome as a `boot` result
+  for the reboot's sequence number: `done` (committed) or `failed` (it did
+  not come up; back on the old slot).
+* **What it writes, and nothing else** (`agent/src/system.rs`): the inactive
+  slot's raw partition (`/dev/disk/by-partuuid/<disk id>-02` or `-03`), its
+  directory on the FAT boot partition (`/boot/a/` or `/boot/b/`), and the two
+  boot-state sectors. It runs one program, `systemctl`. Never the QSPI, its
+  U-Boot environment, the partition table or `boot.scr`. A test reads
+  `system.rs` and fails if it spawns anything else or names the
+  boot-firmware tools. The NixOS unit gives it a read-only `/`, `/boot`
+  writable, and only the SD card's block devices.
+* Failed orders (download failed, a file that does not match, a slot that
+  does not read back) are used up, not retried. Sign a new one.
 
 ## Layout
 
 | | |
 |---|---|
-| `proto/` (`emco-fleet-proto`) | keys and envelopes, messages, tokens, policy |
-| `server/` (`emco-fleet-server`) | axum. State is one JSON file (`<data>/state.json`, atomic writes): latest sample, bounded history, published manifest, queued commands per device |
+| `proto/` (`emco-fleet-proto`) | keys (on middleware's trust types) and envelopes, bundles, the boot state, messages, tokens, policy |
+| `server/` (`emco-fleet-server`) | axum. State is one JSON file (`<data>/state.json`, atomic writes); bundle files in `<data>/files/<sha256>` |
 | `agent/` (`emco-fleet-agent`) | the board's poller. `System` trait, `RealSystem` |
-| `cli/` (`emco-fleet`) | `keygen`, `pubkey`, `token`, `publish`, `command`, `cancel`, `devices` |
-| `Dockerfile`, `nix/image.nix` | the server image, from Docker or from Nix |
-| `nix/package.nix` | the workspace, or selected `members` |
+| `cli/` (`emco-fleet`) | `pubkey`, `keygen`, `token`, `publish`, `command`, `cancel`, `devices` |
+| `Dockerfile`, `nix/image.nix` | the server image, from Docker or from Nix (`nix build .#emco-fleet-image`) |
+| `nix/package.nix` | the workspace, or selected `members` (`nix build .#emco-fleet`) |
 | `deploy/compose.yaml`, `deploy/env.example` | the server behind Traefik |
 | `../nix/fleet.nix` | `services.emco-fleet-agent`, the NixOS module for the board (off by default) |
+| `../nix/ab.nix` | the A/B card: layout, `boot.scr`, the slot's squashfs store, the bundle and the card image |
+
+The workspace depends on `../../../middleware` (the sibling checkout) by
+path, while middleware's `stack/signed-updates` branch is unpublished; the
+flake reaches the same checkout through its `middleware` input.
 
 ```sh
 cd kd240/fleet
-cargo fmt --check && cargo clippy --all-targets -- -D warnings
-cargo test        # 58 tests: proto 33, server 7, agent 5 + 13 end to end
+cargo fmt -p emco-fleet-proto -p emco-fleet-server -p emco-fleet-agent -p emco-fleet --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace   # proto 53, server 7, agent 6 + 16 end to end, cli 6 (+ SoftHSM2 when installed)
 ```
+
+(`cargo fmt --all` would also format middleware, through the path
+dependency: name the packages.)
 
 ## One-time setup (build host)
 
 ```sh
-cd kd240/fleet && cargo build --release && export PATH=$PWD/target/release:$PATH
+nix build .#emco-fleet -o result-fleet && export PATH=$PWD/result-fleet/bin:$PATH
 install -d -m 700 ~/.config/emco-fleet && cd ~/.config/emco-fleet
 
-emco-fleet keygen --name emco-fleet-1 --out orders.sec > orders.pub   # order-signing key; orders.pub goes to the board
-nix-store --generate-binary-cache-key emco-fleet-cache-1 cache.sec cache.pub   # cache key; cache.pub goes to the board
-emco-fleet token --device kd240 > kd240.token-pair                   # line 2: the board's token; line 4: the server's line
-head -c 32 /dev/urandom | base64 > admin.token && chmod 600 *       # the admin token (also onto the server)
+# The signing key: in the card (as for mwctl; PKCS11_MODULE, PKCS11_TOKEN,
+# PKCS11_PIN in the environment or ~/.env) ...
+emco-fleet pubkey --pkcs11 emco-fleet > orders.pub       # the board's trustedKeys line
+# ... or a software key:
+emco-fleet keygen --name emco-fleet-1 --out orders.sec > orders.pub
+
+emco-fleet token --device kd240 > kd240.token-pair       # line 2: the board's token; line 4: the server's line
+head -c 32 /dev/urandom | base64 > admin.token && chmod 600 *
 ```
 
-Back up `orders.sec` and `cache.sec`. Without them the board can only be
-updated over SSH (`nixos-rebuild`), as now.
+A card key is made with `mwctl key new --pkcs11 emco-fleet` (P-256, not
+extractable). The same label can sign middleware payloads.
 
 ## Deploy the server (owner's host)
 
 ```sh
-# Copy kd240/fleet to the host. Then, in kd240/fleet/deploy:
-cp env.example .env            # FLEET_HOST=fleet.vishnefske.com, TRAEFIK_NETWORK, TRAEFIK_ENTRYPOINT, TRAEFIK_CERTRESOLVER
-install -d -m 700 secrets cache
-cp ~/.config/emco-fleet/admin.token secrets/admin.token       # from the build host
-sed -n 4p kd240.token-pair > secrets/device-tokens             # `kd240 sha256:…` (the hash, not the token)
-cp ~/.config/emco-fleet/orders.pub secrets/trusted-keys        # optional: refuse mis-signed orders at publish
-sudo chown -R 65532:65532 secrets cache && chmod 600 secrets/*
-docker compose up -d --build   # or: nix build the image (nix/image.nix), docker load, FLEET_IMAGE=…
+nix build .#emco-fleet-image && docker load < result   # emco-fleet-server:latest
+# In kd240/fleet/deploy:
+cp env.example .env            # FLEET_HOST, TRAEFIK_NETWORK, TRAEFIK_ENTRYPOINT, TRAEFIK_CERTRESOLVER
+install -d -m 700 secrets
+cp ~/.config/emco-fleet/admin.token secrets/admin.token
+sed -n 4p kd240.token-pair > secrets/device-tokens       # `kd240 sha256:…` (the hash, not the token)
+cp ~/.config/emco-fleet/orders.pub secrets/trusted-keys  # optional: refuse mis-signed orders at publish
+sudo chown -R 65532:65532 secrets && chmod 600 secrets/*
+docker compose up -d
 curl https://$FLEET_HOST/healthz
 ```
 
 All three secret files must exist before `up`. Otherwise Docker makes
-directories in their place. The router serves the API and `/cache/` on one
-host name. `/cache/` is public (store paths, signed). The system closure
-must therefore hold no secrets, which is already the rule for this repo.
-The data volume holds `state.json`. Back it up if you care about history.
+directories in their place. The data volume holds `state.json` and the
+bundle files (a few hundred MiB per release; delete old ones by hash when
+no board needs them).
 
-## Enable the agent on the board (once, over SSH as today)
+## The board
 
-`nix/fleet.nix` is not imported anywhere yet. To turn it on, add this to
-`kd240/nix/configuration.nix`, then `just deploy` as usual:
+The agent runs on the A/B card layout, `nixosConfigurations.kd240-ab`
+(`../nix/ab.nix`), which imports `../nix/fleet.nix`. That layout **has not
+booted on a board yet**; the ext4 `nixosConfigurations.kd240` stays the
+default until it has. To enable the agent there:
 
 ```nix
-  imports = [ … ./service.nix ./fleet.nix ];
-
   services.emco-fleet-agent = {
     enable = true;
-    serverUrl = "https://fleet.vishnefske.com";
+    serverUrl = "https://fleet.example.com";
     tokenFile = "/var/lib/emco-fleet-agent/token";
-    trustedKeys = [ "emco-fleet-1:…" ];                 # orders.pub
-    substituter = "https://fleet.vishnefske.com/cache";
-    substituterPublicKey = "emco-fleet-cache-1:…";      # cache.pub
+    trustedKeys = [ "emco-fleet:p256:MFkw…" ];   # orders.pub
   };
 ```
 
-Then put the token on the board:
-`ssh admin@kd240.local 'sudo install -D -m 600 /dev/stdin /var/lib/emco-fleet-agent/token' < <(sed -n 2p kd240.token-pair)`.
-The agent polls every minute, from two minutes after boot.
+Build and write the card (`nix build
+.#nixosConfigurations.kd240-ab.config.system.build.abImage`, then as
+`just flash`), put the token on it
+(`/var/lib/emco-fleet-agent/token`, mode 0600), and watch the first boot on
+the serial console. The agent polls every minute, from two minutes after
+boot.
 
-The first update has to go through `nixos-rebuild`, because the board must
-already trust the cache key before it can fetch from the cache.
-
-## Publish an update (build host, every release)
+## Publish a release (build host, every release)
 
 ```sh
-cd <repo>
-export FLEET_SERVER=https://fleet.vishnefske.com
-export FLEET_ADMIN_TOKEN_FILE=~/.config/emco-fleet/admin.token FLEET_KEY_FILE=~/.config/emco-fleet/orders.sec
-CACHE=~/.cache/emco-fleet/cache            # local mirror of the server's /cache
+export FLEET_SERVER=https://fleet.example.com
+export FLEET_ADMIN_TOKEN_FILE=~/.config/emco-fleet/admin.token FLEET_PKCS11_KEY=emco-fleet
 
-# 1. Build the system (x86-64 host: the kernel is cross-compiled; see ../README.md).
-toplevel=$(nix build --no-link --print-out-paths .#nixosConfigurations.kd240.config.system.build.toplevel)
+# 1. Build the bundle (x86-64 host: the kernel is cross-compiled; see ../README.md).
+nix build .#kd240-bundle -o result-bundle
 
-# 2. Put its closure in the signed static cache, and upload: NARs first, then narinfos,
-#    so the board never sees a narinfo whose NAR isn't there yet.
-nix copy --to "file://$CACHE?compression=zstd&secret-key=$HOME/.config/emco-fleet/cache.sec" "$toplevel"
-rsync -a --ignore-existing "$CACHE/nar/" owner-host:/path/to/kd240/fleet/deploy/cache/nar/
-rsync -a "$CACHE/" owner-host:/path/to/kd240/fleet/deploy/cache/
+# 2. Upload its files and publish the signed manifest. --stage also writes
+#    it into the inactive slot now (allowed while the lathe is busy).
+emco-fleet publish --device kd240 --bundle result-bundle --stage --note "$(git rev-parse --short HEAD)"
 
-# 3. Sign and publish the manifest. The board fetches and checks it; --stage also
-#    makes it the next boot's default (allowed while the lathe is busy).
-emco-fleet publish --device kd240 --toplevel "$toplevel" --stage --note "$(git rev-parse --short HEAD)"
+# 3. Boot it once, when the lathe is idle (valid for --ttl-s, default 1 h).
+#    It commits itself if healthy; otherwise the next reset falls back.
+emco-fleet command --device kd240 reboot --bundle result-bundle
 
-# 4. Optionally, activate now or reboot into it (interlocked; valid for --ttl-s, default 1 h).
-emco-fleet command --device kd240 switch --toplevel "$toplevel"
-emco-fleet command --device kd240 reboot                       # or: reboot --toplevel "$toplevel"
-
-# 5. Watch it.
-emco-fleet devices                  # or --device kd240 for the history size, --json for everything
-emco-fleet cancel --device kd240    # drop queued commands (a deferred switch you no longer want)
+# 4. Watch it.
+emco-fleet devices                  # slots, results; --device kd240 for history size, --json for everything
+emco-fleet cancel --device kd240    # drop queued commands (a deferred reboot you no longer want)
 ```
 
-`emco-fleet publish` reads the toplevel locally and runs the board's own
-toplevel check before signing. `--print` writes the signed envelope to
-stdout instead of sending it, for carrying it over by hand. Sequence numbers
-default to the time in milliseconds. A clock that goes backwards gets the
-order refused (409 from the server, a replay on the board), never accepted.
+`emco-fleet` checks every file against `bundle.json` before signing.
+`--print` writes the signed envelope to stdout instead of sending it.
+Sequence numbers default to the time in milliseconds; a clock that goes
+backwards gets the order refused (409 from the server, a replay on the
+board), never accepted.
 
 ## Server API
 
@@ -219,24 +244,29 @@ order refused (409 from the server, a replay on the board), never accepted.
 | `POST /api/v1/devices/{id}/commands` | admin | `Envelope`. 409 for an old or duplicate seq, 429 past `FLEET_MAX_PENDING` |
 | `DELETE /api/v1/devices/{id}/commands` | admin | drop the queue |
 | `GET /api/v1/devices`, `GET /api/v1/devices/{id}` | admin | summaries, or one device with its history |
-| `GET /cache/…` | none | the binary cache |
+| `PUT /api/v1/files/{sha256}` | admin | a bundle file, streamed to disk; 400 unless its SHA-256 is the name, 201 stored, 204 already there |
+| `GET /api/v1/files/{sha256}` | any device, admin | download |
 | `GET /healthz` | none | `ok` |
 
-Telemetry covers: host name, `/run/current-system`, `/run/booted-system`,
-the profile's system, the newest fetched manifest, `uname -r`/`-v` (from
-`/proc/sys/kernel`), uptime, load, memory, up to eight temperatures (hwmon,
-and IIO such as the ZynqMP AMS), the `systemctl --failed` count, the lathe's
-`run` state, and the last ten results. That is about 1 KiB. The server keeps
-the latest sample on every poll, and a history sample every
-`FLEET_HISTORY_EVERY_S` (300 s), up to `FLEET_HISTORY` (500) samples, about
-42 hours.
+Telemetry covers: host name, `/run/current-system`, the slots (booted,
+committed, to be tried, the release in each, the newest manifest's and
+whether it is staged), `uname -r`/`-v`, uptime, load, memory, up to eight
+temperatures (hwmon, and IIO such as the ZynqMP AMS), the `systemctl
+--failed` count, the lathe's `run` state, and the last ten results. That is
+about 1 KiB. The server keeps the latest sample on every poll, and a
+history sample every `FLEET_HISTORY_EVERY_S` (300 s), up to
+`FLEET_HISTORY` (500) samples, about 42 hours.
+
+Telemetry is HTTPS polling for now; moving it onto the middleware mesh is
+later work.
 
 ## Not verified yet
 
-* **Nothing has run on the board.** In particular: `ProtectSystem=strict`
-  with `ReadWritePaths=/nix/var/nix` for `nix-env` on the system profile;
-  `systemd-run --wait --pipe` for `switch-to-configuration` from inside the
-  sandboxed unit; the hwmon/IIO temperature paths on the KD240; and
-  `nix-store --realise` from the HTTPS cache through Traefik.
+* **Nothing of the A/B path has run on the board**: `boot.scr`'s boot-state
+  handling (`usb read`/`write`, `crc32` + `cmp.l`, `env import -t`), the
+  initrd's mount of the slot's squashfs as the store, the agent writing
+  `/dev/sda2`/`sda3` and `/boot/{a,b}` through the hardened unit, and
+  `fadvise(DONTNEED)` making the read-back come from the card.
+* The hwmon/IIO temperature paths on the KD240.
 * The compose file was checked with `docker compose config` only. It has
   not run behind a real Traefik.

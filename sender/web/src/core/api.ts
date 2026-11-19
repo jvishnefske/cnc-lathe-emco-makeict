@@ -57,4 +57,6 @@ export interface CoreApi {
   parseProgram(text: string): ProgramApi;
   createSession(profile: MachineProfile): SessionApi;
   createVirtualMachine(profile: MachineProfile): VirtualMachineApi;
+  /** The machine's profile as the core defines it (cnc/model's numbers). */
+  defaultProfile(): MachineProfile;
 }

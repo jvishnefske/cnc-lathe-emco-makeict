@@ -1,0 +1,9 @@
+{
+  "name": "emco-kd240-ui",
+  "private": true,
+  "type": "module",
+  "description": "No build step and no npm dependencies: the page loads vendor/rxjs-7.8.2.umd.min.js; tests run with `node --test test/`.",
+  "scripts": {
+    "test": "node --test test/"
+  }
+}

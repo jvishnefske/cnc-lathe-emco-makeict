@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Deliberately empty. emco_lathe_handler.py builds the whole layout in Python
+  so it can be read and reviewed as code; QtVCP only needs a main window to
+  load. Do not add HAL widgets here: the handler HAL-initialises every one it
+  finds, and QtVCP will already have done these.
+-->
+<ui version="4.0">
+ <class>MainWindow</class>
+ <widget class="QMainWindow" name="MainWindow">
+  <property name="geometry">
+   <rect><x>0</x><y>0</y><width>1280</width><height>900</height></rect>
+  </property>
+  <property name="windowTitle">
+   <string>EMCO PC Turn 50</string>
+  </property>
+  <widget class="QWidget" name="centralwidget"/>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

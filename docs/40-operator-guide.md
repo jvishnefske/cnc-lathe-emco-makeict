@@ -90,8 +90,8 @@ Coordinates, which you must internalise before touching G-code:
 3. **[CONTROL — simulator only]** Start the control. *Historical: the machine had to be powered
    on before the DOS PC booted, or the software raised alarm 2520 "RS485 device absent"; the
    operator then ran `CD\PCNC` and `FANOT`.* In the simulator: `docker compose -f
-   sim/compose.yml up`, browser to `http://localhost:8080`, take AXIS out of E-stop and switch
-   machine on (F1, F2).
+   sim/compose.yml up`, browser to `http://localhost:8080`, take the control out of E-stop and
+   switch the machine on (F1, F2). The screen then asks which belt is fitted (§6).
 
 ## 5. Reference the machine — every single power-on, no exceptions
 
@@ -106,8 +106,9 @@ end of each axis [SCHEM] — every coordinate it displays is fiction.
 - Referencing moves the carriage at rapid speed to the far corner. Make sure the tailstock and
   anything in the chuck are clear of that path first.
 
-**[CONTROL — simulator only]** In the simulator: home each axis (AXIS: select axis, Home, or
-Ctrl-Home for all). The soft limits that then protect you in the simulator **do not exist on
+**[CONTROL — simulator only]** In the simulator: press **Home All**. The simulator's screen
+refuses to run, jog, start the spindle or accept MDI until you have, and it throws the reference
+away again at every E-stop, exactly as the real machine does. The soft limits that then protect you in the simulator **do not exist on
 the real machine** — do not let them teach false confidence. *Historical: F1 → F7 (REF), then
 keypad 5 to execute; the machine rapids to the reference point; machine zero is the spindle
 centreline at the spindle front face.*
@@ -173,7 +174,8 @@ Rules that keep the turret out of the chuck:
 
 - Max stickout 12.7 mm [0.50 in]. [MANUAL]
 - **Retract fully in X before any tool change** — the turret sweeps a wide circle when
-  indexing. The example programs all do `G53 G0 X48` first; copy that habit.
+  indexing. The example programs all open with `G53 G0 X96` (they run in diameter mode, G7,
+  where the full 48 mm radius retract is written X96); copy that habit.
 - Spindle stopped before indexing.
 
 **[CONTROL — simulator only]** Tool change is `T_ M6` (simulator) — the turret indexes and the
@@ -201,10 +203,11 @@ boring, because on a real machine an error here is a crash.
 3. **Face the end**: jog the tool carefully to just touch the rotating face, then take a light
    facing cut so the face is clean and square.
 4. **Do not move Z.** The tool tip is now exactly at your part's Z0.
-5. Set the work offset here: in the simulator/AXIS, "Touch Off" with Z = 0 (G54).
+5. Set the work offset here: in the simulator, the **Touch-off** tab walks this section step by
+   step and sets G54 Z0 for you (`G10 L20 P1 Z0`).
    *Historical: OFFSET → W.SHIFT, enter the measured distance as a negative Z work shift; the
    binder's alternative was dragging a strip of paper between tool and face to feel the touch.*
-6. Retract in X (`G53 G0 X48`), stop the spindle, and verify: commanding `G0 Z5` should put the
+6. Retract in X (`G53 G0 X96` in diameter mode, `X48` in radius mode), stop the spindle, and verify: commanding `G0 Z5` should put the
    tool 5 mm to the right of the fresh face. If it doesn't, stop and redo — do not "adjust as
    you go".
 
@@ -231,8 +234,10 @@ boring, because on a real machine an error here is a crash.
 1. **Simulator, always** — even for programs you wrote yourself, even for the second run after
    "one small edit". `docker compose -f sim/compose.yml up`, open the program, home, and run it
    watching the backplot. The example programs in `gcode/` (start with
-   `gcode/tutorial-part.ngc`) are the template: note how each begins with `G53 G0 X48` so it can
-   never open by ploughing into the part.
+   `gcode/tutorial-part.ngc`) are the template: note how each begins with `G53 G0 X96` so it can
+   never open by ploughing into the part. The simulator's screen checks a newly opened program
+   for the mistakes this guide warns about, and makes its first run single block at reduced
+   feed; any edit makes it do so again.
 2. Read the program header. Good programs state their stock, tools and work-zero assumption;
    confirm your setup matches, line by line.
 3. **[CONTROL]** Dry run / single block at the machine: first pass with **no stock**, in single
@@ -255,7 +260,8 @@ boring, because on a real machine an error here is a crash.
 
 ## 12. Shutdown
 
-1. Retract the carriage (`G53 G0 X48 Z0` — the example programs end there already), spindle off.
+1. Retract the carriage (`G53 G0 X96 Z0` in diameter mode — the example programs end there
+   already), spindle off.
 2. Remove the part and stock remnant; chuck key out.
 3. Brush chips off the ways and into the tray — **never** compressed air (drives chips into the
    slideways) and never bare hands (chips are razor wire).

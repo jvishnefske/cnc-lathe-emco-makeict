@@ -39,10 +39,20 @@ pub struct Diagnostic {
 
 impl Diagnostic {
     pub fn error(line: u32, column: u32, message: impl Into<String>) -> Self {
-        Diagnostic { line, column, severity: Severity::Error, message: message.into() }
+        Diagnostic {
+            line,
+            column,
+            severity: Severity::Error,
+            message: message.into(),
+        }
     }
     pub fn warning(line: u32, column: u32, message: impl Into<String>) -> Self {
-        Diagnostic { line, column, severity: Severity::Warning, message: message.into() }
+        Diagnostic {
+            line,
+            column,
+            severity: Severity::Warning,
+            message: message.into(),
+        }
     }
 }
 
@@ -73,11 +83,17 @@ pub struct Block {
 
 impl Block {
     pub fn word(&self, letter: char) -> Option<f64> {
-        self.words.iter().find(|w| w.letter == letter).map(|w| w.value)
+        self.words
+            .iter()
+            .find(|w| w.letter == letter)
+            .map(|w| w.value)
     }
     /// All values for a letter, in order (G and M can repeat in a block).
     pub fn all(&self, letter: char) -> impl Iterator<Item = f64> + '_ {
-        self.words.iter().filter(move |w| w.letter == letter).map(|w| w.value)
+        self.words
+            .iter()
+            .filter(move |w| w.letter == letter)
+            .map(|w| w.value)
     }
     pub fn has_any_of(&self, letters: &[char]) -> bool {
         self.words.iter().any(|w| letters.contains(&w.letter))
@@ -118,7 +134,11 @@ pub fn lex_line(text: &str, line: u32, diags: &mut Vec<Diagnostic>) -> Option<Bl
                 i += 1;
             }
             if i >= bytes.len() {
-                diags.push(Diagnostic::warning(line, start as u32, "unclosed '(' comment"));
+                diags.push(Diagnostic::warning(
+                    line,
+                    start as u32,
+                    "unclosed '(' comment",
+                ));
                 break;
             }
             i += 1; // consume ')'
@@ -166,7 +186,11 @@ pub fn lex_line(text: &str, line: u32, diags: &mut Vec<Diagnostic>) -> Option<Bl
                     }
                     clean.push(letter);
                     clean.push_str(&num_text);
-                    words.push(Word { letter, value: v, column: col });
+                    words.push(Word {
+                        letter,
+                        value: v,
+                        column: col,
+                    });
                 }
                 _ => {
                     diags.push(Diagnostic::error(
@@ -178,14 +202,23 @@ pub fn lex_line(text: &str, line: u32, diags: &mut Vec<Diagnostic>) -> Option<Bl
             }
             continue;
         }
-        diags.push(Diagnostic::error(line, i as u32, format!("unexpected character '{c}'")));
+        diags.push(Diagnostic::error(
+            line,
+            i as u32,
+            format!("unexpected character '{c}'"),
+        ));
         i += 1;
     }
 
     if words.is_empty() && !block_skip {
         return None; // blank or comment-only line: no block
     }
-    Some(Block { line, words, block_skip, clean })
+    Some(Block {
+        line,
+        words,
+        block_skip,
+        clean,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -333,7 +366,11 @@ impl ModalState {
     /// Default modal state with the given work offset preset (machine
     /// coordinates of work zero).
     pub fn with_work_offset(off_x: f64, off_z: f64) -> ModalState {
-        ModalState { off_x, off_z, ..ModalState::default() }
+        ModalState {
+            off_x,
+            off_z,
+            ..ModalState::default()
+        }
     }
 
     fn unit_factor(&self) -> f64 {
@@ -359,25 +396,37 @@ impl ModalState {
     /// Modal display strings for the UI, e.g. `["G21","G90","G95","G01"]`.
     pub fn modal_display(&self) -> Vec<String> {
         let mut v = Vec::with_capacity(6);
-        v.push(match self.units {
-            Units::Mm => "G21",
-            Units::Inch => "G20",
-        }.to_string());
-        v.push(match self.distance {
-            Distance::Absolute => "G90",
-            Distance::Incremental => "G91",
-        }.to_string());
-        v.push(match self.feed_mode {
-            FeedMode::UnitsPerMin => "G94",
-            FeedMode::UnitsPerRev => "G95",
-        }.to_string());
-        v.push(match self.motion {
-            MotionGroup::Rapid => "G00",
-            MotionGroup::Linear => "G01",
-            MotionGroup::ArcCw => "G02",
-            MotionGroup::ArcCcw => "G03",
-            MotionGroup::Thread => "G33",
-        }.to_string());
+        v.push(
+            match self.units {
+                Units::Mm => "G21",
+                Units::Inch => "G20",
+            }
+            .to_string(),
+        );
+        v.push(
+            match self.distance {
+                Distance::Absolute => "G90",
+                Distance::Incremental => "G91",
+            }
+            .to_string(),
+        );
+        v.push(
+            match self.feed_mode {
+                FeedMode::UnitsPerMin => "G94",
+                FeedMode::UnitsPerRev => "G95",
+            }
+            .to_string(),
+        );
+        v.push(
+            match self.motion {
+                MotionGroup::Rapid => "G00",
+                MotionGroup::Linear => "G01",
+                MotionGroup::ArcCw => "G02",
+                MotionGroup::ArcCcw => "G03",
+                MotionGroup::Thread => "G33",
+            }
+            .to_string(),
+        );
         v.push(format!("G{}", self.work_offset));
         v
     }
@@ -426,7 +475,9 @@ impl ModalState {
                     diags.push(Diagnostic::warning(
                         line,
                         0,
-                        format!("canned cycle G{g:.0} is not supported; block ignored for geometry"),
+                        format!(
+                            "canned cycle G{g:.0} is not supported; block ignored for geometry"
+                        ),
                     ));
                 }
                 _ => {
@@ -485,7 +536,11 @@ impl ModalState {
                 9 => self.coolant = false,
                 6 => {} // tool change (handled via T)
                 other => {
-                    diags.push(Diagnostic::warning(line, 0, format!("unsupported M{other}")));
+                    diags.push(Diagnostic::warning(
+                        line,
+                        0,
+                        format!("unsupported M{other}"),
+                    ));
                 }
             }
         }
@@ -498,7 +553,9 @@ impl ModalState {
             if l == Some(2) || l.is_none() {
                 if l.is_none() {
                     diags.push(Diagnostic::warning(
-                        line, 0, "G10 without L word; assuming L2 (set work offset)",
+                        line,
+                        0,
+                        "G10 without L word; assuming L2 (set work offset)",
                     ));
                 }
                 let xdiv = if self.diameter_mode { 2.0 } else { 1.0 };
@@ -510,7 +567,9 @@ impl ModalState {
                 }
             } else {
                 diags.push(Diagnostic::warning(
-                    line, 0, format!("unsupported G10 L{} form; block ignored", l.unwrap_or(-1)),
+                    line,
+                    0,
+                    format!("unsupported G10 L{} form; block ignored", l.unwrap_or(-1)),
                 ));
             }
             return fx;
@@ -522,7 +581,9 @@ impl ModalState {
         }
         if g53 && self.distance == Distance::Incremental {
             diags.push(Diagnostic::error(
-                line, 0, "G53 cannot be used in incremental mode (G91)",
+                line,
+                0,
+                "G53 cannot be used in incremental mode (G91)",
             ));
             return fx;
         }
@@ -568,15 +629,33 @@ impl ModalState {
 
         match self.motion {
             MotionGroup::Rapid => {
-                fx.motion = Some(MotionCmd { kind: MoveKind::Rapid, x0, z0, x1, z1, feed_mm_min: 0.0 });
+                fx.motion = Some(MotionCmd {
+                    kind: MoveKind::Rapid,
+                    x0,
+                    z0,
+                    x1,
+                    z1,
+                    feed_mm_min: 0.0,
+                });
             }
             MotionGroup::Linear | MotionGroup::Thread => {
                 if self.motion == MotionGroup::Thread {
                     self.warn_thread_rpm(line, diags);
                 }
                 let feed = self.checked_feed(line, diags);
-                let kind = if self.motion == MotionGroup::Thread { MoveKind::Thread } else { MoveKind::Feed };
-                fx.motion = Some(MotionCmd { kind, x0, z0, x1, z1, feed_mm_min: feed });
+                let kind = if self.motion == MotionGroup::Thread {
+                    MoveKind::Thread
+                } else {
+                    MoveKind::Feed
+                };
+                fx.motion = Some(MotionCmd {
+                    kind,
+                    x0,
+                    z0,
+                    x1,
+                    z1,
+                    feed_mm_min: feed,
+                });
             }
             MotionGroup::ArcCw | MotionGroup::ArcCcw => {
                 let ccw = self.motion == MotionGroup::ArcCcw;
@@ -625,9 +704,14 @@ impl ModalState {
     fn checked_feed(&mut self, line: u32, diags: &mut Vec<Diagnostic>) -> f64 {
         if self.feed <= 0.0 && !self.warned_no_feed {
             self.warned_no_feed = true;
-            diags.push(Diagnostic::warning(line, 0, "feed move with no feed rate set"));
+            diags.push(Diagnostic::warning(
+                line,
+                0,
+                "feed move with no feed rate set",
+            ));
         }
-        if self.feed_mode == FeedMode::UnitsPerRev && self.spindle_rpm <= 0.0 && !self.warned_no_rpm {
+        if self.feed_mode == FeedMode::UnitsPerRev && self.spindle_rpm <= 0.0 && !self.warned_no_rpm
+        {
             self.warned_no_rpm = true;
             diags.push(Diagnostic::warning(
                 line,
@@ -647,7 +731,11 @@ impl ModalState {
     fn resolve_target(&self, block: &Block, machine_coords: bool) -> (f64, f64) {
         let k = self.unit_factor();
         let xdiv = if self.diameter_mode { 2.0 } else { 1.0 };
-        let (ox, oz) = if machine_coords { (0.0, 0.0) } else { (self.off_x, self.off_z) };
+        let (ox, oz) = if machine_coords {
+            (0.0, 0.0)
+        } else {
+            (self.off_x, self.off_z)
+        };
         let mut x1 = self.x;
         let mut z1 = self.z;
         if let Some(x) = block.word('X') {
@@ -794,7 +882,13 @@ impl Program {
             }
         }
         let (segments, bounds) = crate::geom::interpret(&blocks, &mut diagnostics);
-        Program { lines, blocks, diagnostics, segments, bounds }
+        Program {
+            lines,
+            blocks,
+            diagnostics,
+            segments,
+            bounds,
+        }
     }
 
     pub fn line_count(&self) -> u32 {
@@ -934,7 +1028,10 @@ mod tests {
 
     #[test]
     fn incremental_g91_and_uw_words() {
-        let mut m = ModalState { diameter_mode: false, ..ModalState::default() };
+        let mut m = ModalState {
+            diameter_mode: false,
+            ..ModalState::default()
+        };
         let mut d = Vec::new();
         let b1 = lex_line("G0 X10 Z-10", 0, &mut d).unwrap();
         m.apply_block(&b1, &mut d);
@@ -990,7 +1087,10 @@ mod tests {
         m.apply_block(&b, &mut d);
         let b2 = lex_line("G1 Z-5", 1, &mut d).unwrap();
         m.apply_block(&b2, &mut d);
-        let n = d.iter().filter(|x| x.message.contains("spindle speed 0")).count();
+        let n = d
+            .iter()
+            .filter(|x| x.message.contains("spindle speed 0"))
+            .count();
         assert_eq!(n, 1);
     }
 
@@ -1050,34 +1150,55 @@ mod tests {
     #[test]
     fn arc_without_center_words_is_error() {
         let p = Program::parse("G8\nG0 X0 Z0\nG2 X10 Z-10 F100");
-        assert!(p.diagnostics.iter().any(|d| d.message.contains("arc without I/K or R")));
-        assert!(p.segments.iter().all(|s| s.kind != crate::geom::SegKind::Arc));
+        assert!(p
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("arc without I/K or R")));
+        assert!(p
+            .segments
+            .iter()
+            .all(|s| s.kind != crate::geom::SegKind::Arc));
     }
 
     #[test]
     fn full_circle_rejected_both_forms() {
         let p = Program::parse("G8 G94 F100\nG0 X10 Z0\nG2 X10 Z0 I5");
-        assert!(p.diagnostics.iter().any(|d| d.message.contains("full-circle")));
+        assert!(p
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("full-circle")));
         let p = Program::parse("G8 G94 F100\nG0 X10 Z0\nG2 X10 Z0 R5");
-        assert!(p.diagnostics.iter().any(|d| d.message.contains("full circle")));
+        assert!(p
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("full circle")));
     }
 
     #[test]
     fn r_too_small_for_chord_is_error() {
         let p = Program::parse("G8 G94 F100\nG0 X0 Z0\nG2 X20 Z0 R5");
-        assert!(p.diagnostics.iter().any(|d| d.message.contains("too small")));
+        assert!(p
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("too small")));
     }
 
     #[test]
     fn ik_radius_mismatch_warns() {
         let p = Program::parse("G8 G94 F100\nG0 X0 Z0\nG2 X10 Z-10 I10 K0.5");
-        assert!(p.diagnostics.iter().any(|d| d.message.contains("radius differs")));
+        assert!(p
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("radius differs")));
     }
 
     #[test]
     fn g78_cycle_treated_like_g76() {
         let p = Program::parse("G8\nG0 X8 Z2\nG78 X7.0 Z-15 F1.0");
-        assert!(p.diagnostics.iter().any(|d| d.message.contains("single thread pass")));
+        assert!(p
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("single thread pass")));
     }
 
     #[test]
@@ -1094,7 +1215,10 @@ mod tests {
 
     #[test]
     fn work_offset_applies_to_absolute_moves() {
-        let mut m = ModalState { off_z: -50.0, ..ModalState::default() };
+        let mut m = ModalState {
+            off_z: -50.0,
+            ..ModalState::default()
+        };
         let mut d = Vec::new();
         let b = lex_line("G0 X20 Z1", 0, &mut d).unwrap();
         let mv = m.apply_block(&b, &mut d).motion.unwrap();
@@ -1111,7 +1235,11 @@ mod tests {
     fn g53_bypasses_offset_but_diameter_mode_still_applies() {
         // The trap from the tutorial program: fully retracted is G53 X96 in
         // diameter mode, because X travel is 48 mm of radius.
-        let mut m = ModalState { off_x: 5.0, off_z: -50.0, ..ModalState::default() };
+        let mut m = ModalState {
+            off_x: 5.0,
+            off_z: -50.0,
+            ..ModalState::default()
+        };
         let mut d = Vec::new();
         let b = lex_line("G53 G0 X96 Z0", 0, &mut d).unwrap();
         let mv = m.apply_block(&b, &mut d).motion.unwrap();
@@ -1131,7 +1259,9 @@ mod tests {
         let b = lex_line("G91 G53 G0 X10", 0, &mut d).unwrap();
         let fx = m.apply_block(&b, &mut d);
         assert!(fx.motion.is_none());
-        assert!(d.iter().any(|x| x.severity == Severity::Error && x.message.contains("G53")));
+        assert!(d
+            .iter()
+            .any(|x| x.severity == Severity::Error && x.message.contains("G53")));
     }
 
     #[test]
@@ -1153,6 +1283,9 @@ mod tests {
     #[test]
     fn negative_feed_is_error() {
         let p = Program::parse("G1 X5 F-3");
-        assert!(p.diagnostics.iter().any(|d| d.message.contains("negative feed")));
+        assert!(p
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("negative feed")));
     }
 }

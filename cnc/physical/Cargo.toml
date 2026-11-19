@@ -1,0 +1,26 @@
+[package]
+name = "cnc-physical"
+description = "The lathe's physical model as a WASM payload (ABI 8): the unit's equipment phases (reference, move, run, spindle, turret) over the node's control-module points, for one machine's PhysicalConfig."
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Without `alloc`: the payload has no heap.
+cnc-model.workspace = true
+middleware.workspace = true
+recipe-core.workspace = true
+# The SDK's panic handler: this payload is no_std.
+mw-payload = { workspace = true, features = ["panic-handler"] }
+
+[build-dependencies]
+cnc-model = { workspace = true, features = ["alloc"] }
+serde_json.workspace = true
+
+[dev-dependencies]
+# mw-posix-node's simulator, to run the model against a machine on the host.
+mw-posix-node.workspace = true
+cnc-model = { workspace = true, features = ["alloc"] }

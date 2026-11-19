@@ -14,7 +14,7 @@ import "./styles.css";
 import { loadCore, type CoreChoice } from "./core";
 import type { ProgramApi, SessionApi, VirtualMachineApi } from "./core/api";
 import type { Backplot, Command, StockSpec } from "./core/types";
-import { DEFAULT_PROFILE, DEFAULT_STOCK } from "./profile";
+import { DEFAULT_STOCK } from "./profile";
 import { DEFAULT_SERIAL_SETTINGS, type Transport } from "./transport/transport";
 import { LoopbackTransport } from "./transport/loopback";
 import { WebSerialTransport } from "./transport/webSerial";
@@ -65,7 +65,7 @@ async function start(): Promise<void> {
   const choice = (params.get("core") ?? "auto") as CoreChoice;
   const { core, note: coreNote } = await loadCore(choice);
 
-  const profile = DEFAULT_PROFILE;
+  const profile = core.defaultProfile();
   const session: SessionApi = core.createSession(profile);
 
   // ---------------------------------------------------------------- state

@@ -1,0 +1,19 @@
+[package]
+name = "cnc-model"
+description = "The lathe's physical configuration (the physical half of MachineProfile, plus its I/O map), the control-module traits and the process/physical payload wire. no_std + alloc."
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[features]
+default = ["alloc"]
+# The configuration's serde types and the batch encoder.
+alloc = ["dep:serde"]
+
+[dependencies]
+serde = { workspace = true, optional = true }
+middleware.workspace = true
+recipe-core.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

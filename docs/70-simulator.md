@@ -9,7 +9,7 @@ There are two simulators in this repository, and neither one controls the lathe.
 
 Start with the LinuxCNC one.
 
-![LinuxCNC AXIS running the PC Turn 50 simulator](img/simulator-axis-lathe.jpg)
+![The emco_lathe screen: referenced, with the touch-off wizard open](img/simulator-emco-lathe-screen.jpg)
 
 ## Why a simulator rather than the machine
 
@@ -44,16 +44,51 @@ needed.
 
 ### Your first simulated part
 
-1. **Take it out of E-stop** — the first toolbar button, or `F1`.
-2. **Turn the machine on** — the second button, or `F2`.
+1. **Take it out of E-stop** — the red `E-STOP` button, or `F1`.
+2. **Turn the machine on** — `Machine on`, or `F2`. The screen asks **which belt is
+   fitted**: the real control needed telling too, and every speed check that follows depends
+   on the answer.
 3. **Reference both axes** — `Home All`. Watch where they go: X drives out to 48 mm and Z to
    0. That is the reference corner, and it is where the real machine's reference sensors are.
    **On the real lathe you must do this after every single power-on**, because it has no
    memory of where it is. Build the habit here, where forgetting is free.
 4. **Open `tutorial-part.ngc`** — it is loaded by default. Read the comments; the program is
    written as a lesson.
-5. **Run it**, and watch the backplot draw the profile.
+5. **Run it** with `Cycle start`, and watch the backplot draw the profile. The first run is
+   single block: press `Cycle start` once per line.
 6. Then try `stepped-shaft.ngc`, which shows subroutines and order of operations.
+
+## The screen
+
+The simulator runs its own LinuxCNC screen, `emco_lathe` (a QtVCP screen in
+`linuxcnc/sim/emco-pcturn50/qtvcp/screens/emco_lathe/`). It exists to make the routine in
+[`40-operator-guide.md`](40-operator-guide.md) a habit, so it enforces the parts of it that
+the real machine punishes:
+
+| Rule | What the screen does | Doc |
+| --- | --- | --- |
+| Reference after every power-on **and every E-stop** | The banner stays red, and cycle start, MDI, jogging, the spindle and touch-off stay disabled, until `Home All` completes. LinuxCNC on its own keeps its reference through an E-stop; this screen throws it away, because the real machine loses it. | 40 §5 |
+| Tell the control which belt is fitted | Asked at every machine-on. The spindle entry is clamped to that belt's range. If the spindle runs outside it, or above 400 rpm while threading, a running program is paused and a hand-started spindle is stopped. | 40 §6 |
+| Touch off, then verify | The `Touch-off` tab walks §9.1 (work Z0) and §9.2 (tool X from a measured diameter, tool Z), issuing the `G10` commands and the verification moves. | 40 §9 |
+| Prove every program, again after every edit | A newly opened program is checked (the `Preflight` tab): half a retract under G7 (`X48` where `X96` is meant), tool changes with the spindle running, `S` words outside the belt, threading above 400 rpm. Errors block cycle start. The first run of any program text it has not seen finish cleanly is single block at 25 % feed. Proven programs are remembered per user in `~/.config/emco-lathe/proven.json`, keyed on the text, so any edit makes it unproven again. | 40 §10, 50 §8 |
+
+The rules themselves are in `emco_rules.py` beside the screen, with no Qt or LinuxCNC in it, and
+are tested on any computer:
+
+```sh
+python3 linuxcnc/sim/emco-pcturn50/tests/test_emco_rules.py
+```
+
+The `Run despite errors` box under the preflight report exists for deliberately running a bad
+program to see what it does. It is logged, and a run made with it never counts as proving the
+program.
+
+### Using AXIS instead
+
+Stock AXIS still works: change `DISPLAY = qtvcp emco_lathe` to `DISPLAY = axis` in
+`linuxcnc/sim/emco-pcturn50/emco-pcturn50.ini`. You lose every check above.
+
+![LinuxCNC AXIS running the PC Turn 50 simulator](img/simulator-axis-lathe.jpg)
 
 The full operating routine, including workholding and touch-off, is in
 [`40-operator-guide.md`](40-operator-guide.md).
@@ -67,7 +102,15 @@ docker exec emco-pcturn50-sim python3 /repo/sim/acceptance-test.py
 ```
 
 That takes the machine out of E-stop, references both axes, indexes the turret through an
-`M6`, and runs both example programs, failing on any interpreter error. It expects a freshly
+`M6`, and runs both example programs, failing on any interpreter error. It drives LinuxCNC
+directly, so it passes whichever screen is configured.
+
+```sh
+docker exec emco-pcturn50-sim python3 /repo/sim/frontend-smoke.py
+```
+
+checks the screen itself: it references the machine, E-stops it, switches it back on, and
+passes only if the reference was thrown away. Stock LinuxCNC keeps it, so this fails under AXIS. It expects a freshly
 started container, because it starts from an un-referenced machine.
 
 ## What the simulator does and does not represent

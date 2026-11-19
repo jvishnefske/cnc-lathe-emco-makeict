@@ -1,0 +1,52 @@
+[package]
+name = "emco-rs485-bridge"
+version = "0.1.0"
+edition = "2021"
+description = "USB<->RS-485 capture bridge for the EMCO PC Turn 50: two CDC-ACM ports, one raw and one carrying timestamped, direction-tagged, flagged records."
+license = "MIT"
+
+[features]
+# LISTEN-ONLY IS THE DEFAULT, and it is a property rather than a mode.
+#
+# With this feature on, the transmit path is `#[cfg]`-ed out entirely: the DE
+# pin is configured as an input with a pull-down and there is no code anywhere
+# in the binary that can assert it. A bug cannot arm a driver whose code does
+# not exist, which is a stronger claim than any runtime flag.
+#
+# Two other things carry the same weight. On the hardware, DE is pulled to GND
+# on the adapter and reaches the MCU only through a link that is not fitted by
+# default. In the transcript, every STATUS record names the build variant, so
+# a capture proves which firmware produced it.
+#
+# Building WITHOUT it is a deliberate act:
+#   cargo build --release --target thumbv7em-none-eabihf --no-default-features
+default = ["listen-only", "board-f407-discovery"]
+listen-only = []
+
+# One board per feature; see `src/board/`. Exactly one must be selected.
+board-f407-discovery = []
+
+[dependencies]
+emco-bridge-core = { path = "../bridge-core" }
+
+embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread", "executor-interrupt"] }
+embassy-stm32 = { version = "0.6", features = ["stm32f407vg", "time-driver-any", "memory-x", "unstable-pac", "exti"] }
+embassy-sync = "0.8"
+embassy-time = "0.5"
+embassy-usb = "0.6"
+embassy-futures = "0.1"
+
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7"
+critical-section = "1"
+panic-halt = "1"
+static_cell = "2"
+
+[profile.release]
+# Size, one codegen unit, and DEBUG SYMBOLS KEPT: they cost nothing in flash
+# and they are the difference between a fault address and a line number on a
+# board that has no console.
+opt-level = "s"
+lto = true
+codegen-units = 1
+debug = 2

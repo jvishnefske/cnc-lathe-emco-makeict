@@ -1,0 +1,18 @@
+[package]
+name = "cnc-process"
+description = "The lathe's process model as a WASM payload: operator commands, the reference gate, the screen's preflight and G-code (the sender's own interpreter) as phase commands and motion segments for whichever physical unit it is given."
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+cnc-model = { workspace = true, features = ["alloc"] }
+recipe-core.workspace = true
+# std on wasm32: the sender's interpreter and the screen's rules are std
+# crates; std brings the allocator. So no SDK panic handler (std has one).
+mw-payload.workspace = true
+emco-sender-core = { path = "../../sender/core", default-features = false }
+emco-rules = { path = "../../kd240/web/rules" }

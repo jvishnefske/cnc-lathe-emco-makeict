@@ -59,7 +59,8 @@ Learn on the simulator first. It is free to crash.
 [`docs/20-control-architecture.md`](docs/20-control-architecture.md)
 
 **I am working on the serial protocol.** → [`docs/30-serial-protocol.md`](docs/30-serial-protocol.md)
-and [`tools/README.md`](tools/README.md). Read the safety rules before you plug anything in.
+and [`tools/README.md`](tools/README.md). Read the safety rules before you plug anything in. The
+capture instrument doc 30 asks for is [`firmware/README.md`](firmware/README.md).
 
 **Something is broken.** → [`docs/80-maintenance.md`](docs/80-maintenance.md)
 
@@ -68,6 +69,7 @@ and [`tools/README.md`](tools/README.md). Read the safety rules before you plug 
 ```
 docs/          the documentation set; start at 00-overview.md
 sender/        browser G-code sender — Rust/WASM core + TypeScript UI + a Python CLI fallback
+firmware/      the USB↔RS-485 capture bridge: an STM32F4 built to answer docs/30
 linuxcnc/      simulator config, and a config for the future retrofit option
 sim/           containerised LinuxCNC — `docker compose -f sim/compose.yml up`
 tools/         serial discovery and testing tools
@@ -111,6 +113,12 @@ EMCO and LinuxCNC community record. It has **not** all been confirmed against th
   [`docs/30-serial-protocol.md`](docs/30-serial-protocol.md) succeeds, the sender talks to a
   simulated machine, not a real one. That is the project's critical path — and it may not be
   winnable, in which case the retrofit is the answer.
+- **The capture bridge in [`firmware/`](firmware/README.md) is written and has never been run on
+  a board.** Its host side — the record format, the decoder, the simulator — is tested end to end
+  with no hardware, and `./firmware/check.sh` proves that much. USB enumeration, timestamp
+  accuracy and the DE turnaround are all untested, every pin in its board file is provisional
+  until somebody says what the hardware is, and no timing figure from it should be quoted until
+  the bench calibration in `firmware/README.md` has been done.
 - The simulator and the sender's simulated mode both work today and are useful today, because
   neither depends on the protocol.
 

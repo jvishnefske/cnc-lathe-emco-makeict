@@ -61,7 +61,9 @@ enum Activity {
     Idle,
     Moving,
     /// Turret indexing; done at `until_ms` (or never, when jammed).
-    TurretIndex { until_ms: f64 },
+    TurretIndex {
+        until_ms: f64,
+    },
     Homing,
 }
 
@@ -230,7 +232,11 @@ impl VirtualMachine {
     /// Advance the simulation to `now_ms` and consume bytes the host sent.
     /// Returns bytes the machine emits back.
     pub fn step(&mut self, now_ms: f64, host_tx: &[u8]) -> Vec<u8> {
-        let dt_ms = if self.started { (now_ms - self.now_ms).max(0.0) } else { 0.0 };
+        let dt_ms = if self.started {
+            (now_ms - self.now_ms).max(0.0)
+        } else {
+            0.0
+        };
         self.started = true;
         self.now_ms = now_ms;
 
@@ -278,7 +284,11 @@ impl VirtualMachine {
                     }
                     let mut diags: Vec<Diagnostic> = Vec::new();
                     match lex_line(&line, 0, &mut diags) {
-                        Some(block) if diags.iter().all(|d| d.severity != crate::gcode::Severity::Error) => {
+                        Some(block)
+                            if diags
+                                .iter()
+                                .all(|d| d.severity != crate::gcode::Severity::Error) =>
+                        {
                             self.queue.push_back(block);
                         }
                         _ => {
@@ -340,7 +350,9 @@ impl VirtualMachine {
 
     /// Trapezoidal profile integration. Returns true when the move completed.
     fn advance_motion(&mut self, dt_ms: f64) -> bool {
-        let Some(exec) = &mut self.exec else { return true };
+        let Some(exec) = &mut self.exec else {
+            return true;
+        };
         let a = self.profile.accel_mm_sec2.max(1e-6);
         let mut remaining_ms = dt_ms;
         while remaining_ms > 0.0 {
@@ -361,7 +373,11 @@ impl VirtualMachine {
                 break;
             }
         }
-        let t = if exec.length > 0.0 { exec.s / exec.length } else { 1.0 };
+        let t = if exec.length > 0.0 {
+            exec.s / exec.length
+        } else {
+            1.0
+        };
         // Believed position along the commanded path (the control counts steps
         // and believes them all).
         let (bx, bz) = point_along(exec.kind, exec.x0, exec.z0, exec.x1, exec.z1, t);
@@ -384,7 +400,9 @@ impl VirtualMachine {
 
     fn pump(&mut self, out: &mut Vec<u8>) {
         while self.activity == Activity::Idle {
-            let Some(block) = self.queue.pop_front() else { break };
+            let Some(block) = self.queue.pop_front() else {
+                break;
+            };
             if !self.alarms.is_empty() {
                 out.extend_from_slice(b"error: machine in alarm state\r\n");
                 continue;
@@ -420,7 +438,10 @@ impl VirtualMachine {
         let (bx, bz) = (self.modal.x, self.modal.z);
         let mut diags = Vec::new();
         let fx = self.modal.apply_block(block, &mut diags);
-        if let Some(d) = diags.iter().find(|d| d.severity == crate::gcode::Severity::Error) {
+        if let Some(d) = diags
+            .iter()
+            .find(|d| d.severity == crate::gcode::Severity::Error)
+        {
             // Undo the interpreter's position advance: the move is rejected.
             self.modal.x = bx;
             self.modal.z = bz;
@@ -430,15 +451,15 @@ impl VirtualMachine {
 
         if let Some(station) = fx.tool_change {
             if station == 0 || station > self.profile.turret_stations {
-                out.extend_from_slice(
-                    format!("error: no turret station {station}\r\n").as_bytes(),
-                );
+                out.extend_from_slice(format!("error: no turret station {station}\r\n").as_bytes());
                 return;
             }
             if station != self.tool {
                 self.pending_tool = station;
                 let ms = self.profile.turret_index_seconds * 1000.0;
-                self.activity = Activity::TurretIndex { until_ms: self.now_ms + ms };
+                self.activity = Activity::TurretIndex {
+                    until_ms: self.now_ms + ms,
+                };
                 self.turret_jam_deadline_ms = self.now_ms + 3.0 * ms;
                 // Ack comes when the index completes (or the jam alarm fires).
                 return;
@@ -478,15 +499,28 @@ impl VirtualMachine {
             z0: mv.z0,
             x1: mv.x1,
             z1: mv.z1,
-            cx: match mv.kind { MoveKind::Arc { cx, .. } => Some(cx), _ => None },
-            cz: match mv.kind { MoveKind::Arc { cz, .. } => Some(cz), _ => None },
-            ccw: match mv.kind { MoveKind::Arc { ccw, .. } => Some(ccw), _ => None },
+            cx: match mv.kind {
+                MoveKind::Arc { cx, .. } => Some(cx),
+                _ => None,
+            },
+            cz: match mv.kind {
+                MoveKind::Arc { cz, .. } => Some(cz),
+                _ => None,
+            },
+            ccw: match mv.kind {
+                MoveKind::Arc { ccw, .. } => Some(ccw),
+                _ => None,
+            },
             line: 0,
             feed_mm_min: None,
             tool: None,
         };
         let seg = crate::geom::Segment {
-            kind: if matches!(mv.kind, MoveKind::Arc { .. }) { crate::geom::SegKind::Arc } else { seg.kind },
+            kind: if matches!(mv.kind, MoveKind::Arc { .. }) {
+                crate::geom::SegKind::Arc
+            } else {
+                seg.kind
+            },
             ..seg
         };
         let b = crate::geom::segment_bounds(&seg);
@@ -532,7 +566,11 @@ impl VirtualMachine {
     fn start_move(&mut self, kind: MoveKind, x0: f64, z0: f64, x1: f64, z1: f64, vmax: f64) {
         let length = segment_length(kind, x0, z0, x1, z1);
         self.exec = Some(ExecMove {
-            kind, x0, z0, x1, z1,
+            kind,
+            x0,
+            z0,
+            x1,
+            z1,
             length: if length <= 1e-9 { 0.0 } else { length },
             vmax: vmax.max(0.01),
             s: 0.0,
@@ -605,12 +643,21 @@ mod tests {
         let mut m = vm();
         // Radius mode, absolute; 10 mm rapid at 1000 mm/min ≈ 600+ ms with accel.
         let out = m.step(0.0, b"G8 G0 X10 Z-10\r");
-        assert!(!out.windows(2).any(|w| w == b"ok"), "no ack before motion completes");
+        assert!(
+            !out.windows(2).any(|w| w == b"ok"),
+            "no ack before motion completes"
+        );
         let (out, t) = run_until_idle(&mut m, 0.0, 20_000.0);
         assert!(text(&out).contains("ok"), "move must ack when done");
         let (x, z) = m.pos();
-        assert!((x - 10.0).abs() < 1e-6 && (z + 60.0).abs() < 1e-6, "work Z-10 = machine Z-60");
-        assert!(t >= 600.0, "10mm diagonal rapid can't be instant, took {t} ms");
+        assert!(
+            (x - 10.0).abs() < 1e-6 && (z + 60.0).abs() < 1e-6,
+            "work Z-10 = machine Z-60"
+        );
+        assert!(
+            t >= 600.0,
+            "10mm diagonal rapid can't be instant, took {t} ms"
+        );
     }
 
     #[test]
@@ -679,14 +726,21 @@ mod tests {
         assert!(text(&out1).is_empty() || m.busy() || !m.busy());
         run_until_idle(&mut m, 0.0, 5_000.0);
         let out = m.step(6_000.0, b"G2 X0 Z-20 I0 K-10\r");
-        assert!(text(&out).contains("soft limit"), "arc extremum below X min must trip: {}", text(&out));
+        assert!(
+            text(&out).contains("soft limit"),
+            "arc extremum below X min must trip: {}",
+            text(&out)
+        );
     }
 
     #[test]
     fn turret_index_takes_time() {
         let mut m = vm();
         let out = m.step(0.0, b"T0202\r");
-        assert!(!text(&out).contains("ok"), "turret ack must wait for the index");
+        assert!(
+            !text(&out).contains("ok"),
+            "turret ack must wait for the index"
+        );
         assert_eq!(m.tool(), 0);
         let out = m.step(200.0, &[]);
         assert!(!text(&out).contains("ok"));
@@ -748,7 +802,11 @@ mod tests {
         assert!(text(&out).contains("ok"));
         assert!(m.homed());
         let (x, z) = m.pos();
-        assert_eq!((x, z), (m.profile.x_max_mm, 0.0), "reference is X48, machine Z0");
+        assert_eq!(
+            (x, z),
+            (m.profile.x_max_mm, 0.0),
+            "reference is X48, machine Z0"
+        );
     }
 
     #[test]
@@ -786,15 +844,30 @@ mod tests {
         // The real machine has no limit switches: pushing past travel pins
         // the slide at the mechanical stop while the control counts on.
         let mut m = vm();
-        assert!(!m.homed(), "starts un-referenced (no absolute position memory)");
+        assert!(
+            !m.homed(),
+            "starts un-referenced (no absolute position memory)"
+        );
         let out0 = m.step(0.0, b"G8 G0 X60\r"); // x_max is 48
-        assert!(!text(&out0).contains("error"), "no rejection without limit switches");
+        assert!(
+            !text(&out0).contains("error"),
+            "no rejection without limit switches"
+        );
         let (out, _) = run_until_idle(&mut m, 0.0, 60_000.0);
         let s = text(&out);
-        assert!(s.contains("ok"), "the control believes the move completed: {s}");
+        assert!(
+            s.contains("ok"),
+            "the control believes the move completed: {s}"
+        );
         assert!(!s.contains("alarm"), "a stall is silent: {s}");
-        assert!((m.pos().0 - 48.0).abs() < 1e-6, "physically pinned at the stop");
-        assert!((m.believed_pos().0 - 60.0).abs() < 1e-6, "control believes X60");
+        assert!(
+            (m.pos().0 - 48.0).abs() < 1e-6,
+            "physically pinned at the stop"
+        );
+        assert!(
+            (m.believed_pos().0 - 60.0).abs() < 1e-6,
+            "control believes X60"
+        );
         assert!(m.position_lost());
         assert!(!m.homed(), "lost position means unreferenced");
 
@@ -802,7 +875,10 @@ mod tests {
         // (physically at -2) and stalls again at the lower stop.
         m.step(60_001.0, b"G0 X10\r");
         run_until_idle(&mut m, 60_001.0, 60_000.0);
-        assert!((m.pos().0 - (-0.5)).abs() < 1e-6, "pinned at the lower stop (-0.5)");
+        assert!(
+            (m.pos().0 - (-0.5)).abs() < 1e-6,
+            "pinned at the lower stop (-0.5)"
+        );
         assert!((m.believed_pos().0 - 10.0).abs() < 1e-6);
 
         // Referencing off the sensors recovers truth.
@@ -842,7 +918,10 @@ mod tests {
         let d = m.dro();
         assert!((d.x_radius_mm - 10.0).abs() < 1e-6);
         assert!((d.x_diameter_mm - 20.0).abs() < 1e-6);
-        assert!((d.z_work_mm - (d.z_mm + 50.0)).abs() < 1e-9, "work Z through the G54 Z-50");
+        assert!(
+            (d.z_work_mm - (d.z_mm + 50.0)).abs() < 1e-9,
+            "work Z through the G54 Z-50"
+        );
     }
 
     #[test]

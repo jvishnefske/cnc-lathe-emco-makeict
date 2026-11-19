@@ -1,0 +1,16 @@
+[package]
+name = "emco-bridge-core"
+version = "0.1.0"
+edition = "2021"
+description = "Record framing, idle-gap segmentation and overflow accounting for the EMCO USB<->RS-485 capture bridge. No HAL, no clock, no allocation; takes (micros, byte, flags) in and gives framed bytes out."
+license = "MIT"
+
+# No dependencies, deliberately. Everything here is bytes and arithmetic, it
+# has to build for thumbv7em-none-eabihf, and it has to be `cargo test`-able on
+# a laptop with nothing installed. A crate that needs neither a HAL nor an
+# allocator needs nothing at all.
+[dependencies]
+
+[profile.release]
+opt-level = "s"
+lto = true

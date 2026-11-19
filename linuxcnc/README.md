@@ -11,6 +11,8 @@ it, and [`../sim/`](../sim/) for the container that puts it in a browser.
 | File | What it is |
 | --- | --- |
 | `emco-pcturn50.ini` | Machine data, travels, homing, units. Every machine-specific number is in one commented block at the top. |
+| `qtvcp/screens/emco_lathe/` | The simulator's own screen. It enforces the referencing, belt, touch-off and proving routine of the operator guide; see [`../docs/70-simulator.md`](../docs/70-simulator.md#the-screen). All its decisions are in `emco_rules.py`, which has no Qt or LinuxCNC in it. |
+| `tests/test_emco_rules.py` | Tests for those rules. `python3 linuxcnc/sim/emco-pcturn50/tests/test_emco_rules.py`, no LinuxCNC needed. |
 | `turret.hal` | The 6-station turret, as a tool-change handshake with an index delay |
 | `emco-pcturn50.tbl` | Tool table: 3 external stations, 3 internal |
 | `emco-pcturn50.var` | Parameters, shipping with G54 preset to Z −50 so the example programs have somewhere to cut. LinuxCNC rewrites this on exit. |

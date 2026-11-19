@@ -1,0 +1,28 @@
+# systemd unit for the KD240 (see README.md, "Run").
+# Edit --rs485 to the board's RS-485 tty once identified, or drop it.
+[Unit]
+Description=EMCO PC Turn 50 sender service (virtual machine + listen-only RS-485 capture)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=emco
+Group=emco
+SupplementaryGroups=dialout
+StateDirectory=emco-kd240
+ExecStart=/usr/local/bin/emco-kd240 --listen 0.0.0.0:8080 --data /var/lib/emco-kd240 --token-file /etc/emco-kd240/token --rs485 /dev/ttyPS1
+Restart=on-failure
+RestartSec=2
+# The service reads one tty and writes only its state directory.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/emco-kd240
+DevicePolicy=closed
+DeviceAllow=char-ttyS r
+DeviceAllow=char-ttyPS r
+DeviceAllow=char-ttyUL r
+
+[Install]
+WantedBy=multi-user.target

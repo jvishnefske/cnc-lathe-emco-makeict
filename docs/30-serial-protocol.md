@@ -205,8 +205,31 @@ behaviour is unknown (A2). Cheap to check:
    and framings across repeated power cycles and logs raw bytes and timing. A logic analyser on
    DATA± is better than a UART sweep, because the framing may not be async at all — capture
    edges, then decide what it is.
-3. Deliverable: either "bus is silent without a master" (a real finding — log it) or captured
-   frames, which would be gold.
+3. **For anything longer than a few minutes, use the capture bridge**
+   ([`firmware/README.md`](../firmware/README.md)) rather than a dongle. It is an STM32F4 that
+   presents two USB serial ports: a raw passthrough that `emco-listen.py` reads unchanged, and a
+   record stream carrying a **hardware microsecond timestamp per byte, a direction tag, and the
+   UART's own framing/parity/noise/overrun flags**, read by `tools/emco-capture.py`.
+
+   Three things a dongle cannot give, all of which this page needs:
+
+   - **Timing.** Host timestamps are taken at `read()`, after USB's 1 ms frames, `cdc_acm`
+     buffering and scheduler latency. At 9600 baud a character is 1042 µs, so host timing
+     destroys precisely the inter-byte and inter-frame signature that would identify a polled
+     multidrop protocol — which is what §2.2 A1 and A2 are asking about.
+   - **Direction.** On this 3-wire half-duplex bus, once transmit is ever armed (rung 3), your
+     own echo and a reply are the same bytes on the same conductors.
+   - **Framing errors.** A1 says the wire may not be async-UART framed at all, so a framing or
+     parity error **at a known timestamp is a positive finding**. `pyserial` cannot see one.
+
+   The bridge is **listen-only by default as a compile-time property**: the transmit path is not
+   in the binary, DE is an input with a pull-down, and every `STATUS` record names the build
+   variant — so a transcript proves which firmware produced it. It does **not** replace the
+   analyser in step 2; it is the instrument you can leave attached through a power cycle.
+4. Deliverable: either "bus is silent without a master" (a real finding — log it) or captured
+   frames, which would be gold. Either way the transcript goes under `tools/captures/` and the
+   session goes in §8, with the bridge's own `STATUS` line quoted so the build variant is on the
+   record.
 
 ### Rung 3 — guarded active probing (managed risk, low expected value)
 
@@ -308,6 +331,12 @@ RS-232. The correct connection is a purpose-made tap: adapter A/B (or D+/D−) t
 ground to pin 2, nothing on pin 9. Label the cable "RS-485 ONLY — NOT RS-232" and photograph it
 for `docs/img/`.
 
+**Termination: do not fit any.** §1.1 records this bus as already terminated and biased at both
+ends (330 Ω to +5 V, 120 Ω across, 330 Ω to GND). A third 120 Ω terminator on a tap is a real
+hazard, not a belt-and-braces measure — leave the jumper off whatever adapter or bridge you
+attach. The same goes for pin 9: the +5 V there feeds the machine's own bias network and has no
+business powering anything of ours.
+
 Bit-rate sweep for rung 2, in case the framing is async UART (**assumption A1 — it may not
 be**): 9600, 19200, 38400, 57600, 115200, 4800, 2400 at 8N1 and 7E1. A logic-analyser edge
 capture beats the sweep and should be preferred when available.
@@ -374,3 +403,8 @@ Append-only, newest first. Template:
 9. Is the tailstock the manual or the electromechanical variant?
 10. Any EMCO control keyboard (accessory 795 000) in the shop? It is an RS-485 bus device — a
     second protocol specimen and potentially a working bus master for study.
+11. **Before the first real capture: calibrate the bridge on the bench.** Loop its RX to a
+    USB-RS485 dongle sending a known pattern at a known bit rate and check the reported
+    inter-byte deltas against the theoretical character time (1042 µs at 9600, 87 µs at 115200).
+    No lathe required, and until it is done no timing figure from the bridge should be quoted in
+    §8. Procedure in [`firmware/README.md`](../firmware/README.md).

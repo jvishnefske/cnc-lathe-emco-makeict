@@ -9,15 +9,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
+name = "byteorder"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "cnc-model"
+version = "0.1.0"
+dependencies = [
+ "middleware",
+ "recipe-core",
+ "serde",
+]
+
+[[package]]
 name = "emco-sender-core"
 version = "0.1.0"
 dependencies = [
+ "cnc-model",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
@@ -49,6 +65,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "hash32"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47d60b12902ba28e2730cd37e95b8c9223af2808df9e902d4df49588d1470606"
+dependencies = [
+ "byteorder",
+]
+
+[[package]]
+name = "heapless"
+version = "0.9.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "411fdef4df93751117bd9ef8caa0e7f99c65dafec5bd84313eb8e2fdd75e32f2"
+dependencies = [
+ "hash32",
+ "stable_deref_trait",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -70,6 +105,14 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
+name = "middleware"
+version = "0.5.0"
+source = "git+https://github.com/jvishnefske/middleware?rev=514f9747c114f70058361db13365f5efd806775e#514f9747c114f70058361db13365f5efd806775e"
+dependencies = [
+ "heapless",
+]
 
 [[package]]
 name = "once_cell"
@@ -99,6 +142,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
 dependencies = [
  "proc-macro2",
+]
+
+[[package]]
+name = "recipe-core"
+version = "0.1.0"
+source = "git+https://github.com/jvishnefske/middleware?rev=514f9747c114f70058361db13365f5efd806775e#514f9747c114f70058361db13365f5efd806775e"
+dependencies = [
+ "state-table",
 ]
 
 [[package]]
@@ -166,6 +217,17 @@ name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
+
+[[package]]
+name = "stable_deref_trait"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
+
+[[package]]
+name = "state-table"
+version = "0.1.0"
+source = "git+https://github.com/jvishnefske/middleware?rev=514f9747c114f70058361db13365f5efd806775e#514f9747c114f70058361db13365f5efd806775e"
 
 [[package]]
 name = "syn"

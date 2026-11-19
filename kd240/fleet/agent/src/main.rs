@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::Parser;
+use emco_fleet_agent::mesh::{read_state, ProcessProbe, WAIT};
 use emco_fleet_agent::{check_server_url, Agent, Config, RealSystem};
 use emco_fleet_proto::keys::PublicKey;
 use emco_fleet_proto::policy::Identity;
@@ -48,6 +49,14 @@ struct Args {
     /// The lathe service's state endpoint (read only).
     #[arg(long, default_value = "http://127.0.0.1:8080/api/state")]
     local_state_url: String,
+    /// The board's Zenoh router, where the lathe's process payload runs
+    /// (`tcp/127.0.0.1:7447`); with --process-node, the interlock also
+    /// reads the payload's run state (read only).
+    #[arg(long, env = "FLEET_ZENOH_ROUTER", requires = "process_node")]
+    zenoh_router: Option<String>,
+    /// The process payload's node id, 16 hex digits.
+    #[arg(long, env = "FLEET_PROCESS_NODE", requires = "zenoh_router")]
+    process_node: Option<String>,
     /// Allow a plain-HTTP server that is not on loopback (testing only).
     #[arg(long)]
     allow_http: bool,
@@ -94,6 +103,13 @@ fn setup(a: &Args) -> Result<Agent<RealSystem>, String> {
         trusted,
         state_dir: a.state_dir.clone(),
         local_state_url: a.local_state_url.clone(),
+        process_state: match (&a.zenoh_router, &a.process_node) {
+            (Some(r), Some(n)) => {
+                let probe = ProcessProbe::new(r, n)?;
+                Some(Box::new(move || read_state(&probe, WAIT)))
+            }
+            _ => None,
+        },
     };
     Agent::new(
         cfg,

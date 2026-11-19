@@ -198,6 +198,7 @@ impl Fleet {
                 trusted: vec![self.public.clone()],
                 state_dir: self.dir.path().join("agent"),
                 local_state_url: lathe.to_string(),
+                process_state: None,
             },
             sys,
         )
@@ -918,6 +919,46 @@ fn reboot_rechecks_immediately_before_acting() {
     let (_, _, outcome, detail) = last_result(&a);
     assert_eq!(outcome, Outcome::Deferred);
     assert!(detail.contains("running"), "{detail}");
+}
+
+#[test]
+fn a_busy_process_payload_defers_a_reboot_the_service_would_allow() {
+    let f = fleet(true);
+    f.set_run("idle");
+    f.send(&f.command(21, Action::Reboot { bundle: None }));
+    let sys = FakeSystem::new();
+    let mut a = f.agent(sys.clone());
+    // The process payload's state publication: running (byte 2).
+    let state = Arc::new(Mutex::new(2u8));
+    let s = state.clone();
+    a.set_process_state(Some(Box::new(move || {
+        let mut b = vec![0u8; 11];
+        b[0] = *s.lock().unwrap();
+        Ok(b)
+    })));
+    a.poll_once().unwrap();
+    assert!(sys.log().is_empty(), "{:?}", sys.log());
+    let (_, _, outcome, detail) = last_result(&a);
+    assert_eq!(outcome, Outcome::Deferred);
+    assert!(detail.contains("running"), "{detail}");
+    // Done: the reboot goes ahead.
+    *state.lock().unwrap() = 4;
+    a.poll_once().unwrap();
+    assert_eq!(sys.log(), ["reboot"]);
+    drop(a);
+
+    // A payload that cannot be heard falls back to the service.
+    f.send(&f.command(22, Action::Reboot { bundle: None }));
+    sys.power_on();
+    f.set_run("running");
+    let mut a = f.agent(sys.clone());
+    a.set_process_state(Some(Box::new(|| Err("no router".into()))));
+    a.poll_once().unwrap();
+    assert!(
+        last_result(&a).3.contains("running"),
+        "{:?}",
+        last_result(&a)
+    );
 }
 
 #[test]

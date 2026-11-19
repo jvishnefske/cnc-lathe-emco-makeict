@@ -10,7 +10,11 @@
 //!    inactive slot, which nothing running uses. Rebooting is allowed only
 //!    while the lathe service reports `run` = `idle` or `disconnected`;
 //!    anything else, including "could not ask", defers it ([`interlock`]).
-//!    The agent asks again immediately before it acts.
+//!    Where the board runs the lathe's process payload on middleware, its
+//!    run state (read over Zenoh) counts too, and the busier of the two
+//!    wins; the service's is the fallback when the payload cannot be heard
+//!    ([`local_run_state`]). The agent asks again immediately before it
+//!    acts.
 //! 3. The only slot ever written is the one this boot did not come from,
 //!    and only while this boot is the committed one ([`stage_target`]): a
 //!    trial boot never overwrites the slot it would fall back to.
@@ -71,6 +75,45 @@ pub fn run_state_from_api(body: &serde_json::Value) -> Result<RunState, String> 
         .and_then(|r| r.as_str())
         .map(RunState::parse)
         .ok_or_else(|| "no session.run in /api/state".to_string())
+}
+
+/// The process payload's run state from its state publication
+/// (`app/proc/<node>/state`, `cnc_model::proc::ProcState` in `cnc/model`):
+/// its first byte, as the lathe service's mesh transport shows it. A failed
+/// job is an alarm (it stands until the operator clears it). The byte values
+/// are frozen in `cnc/model/src/proc.rs`'s tests.
+pub fn run_state_from_process(body: &[u8]) -> Result<RunState, String> {
+    // [run][program u32][op u16][ops u16][n][message n][assigned]...
+    if body.len() < 11 {
+        return Err(format!("a process state of {} bytes", body.len()));
+    }
+    Ok(match body[0] {
+        0 | 4 => RunState::Idle,
+        1 => RunState::Homing,
+        2 => RunState::Running,
+        3 => RunState::Hold,
+        5 => RunState::Alarm,
+        b => return Err(format!("unknown process run state {b}")),
+    })
+}
+
+/// The run state the interlock decides on: the process payload's
+/// (`process`, `None` where the board does not run one) and the lathe
+/// service's (`api`). The busier wins; a payload that cannot be heard falls
+/// back to the service; both unknown is unknown.
+pub fn local_run_state(
+    process: Option<Result<RunState, String>>,
+    api: Result<RunState, String>,
+) -> Result<RunState, String> {
+    let quiet = |s: &RunState| matches!(s, RunState::Idle | RunState::Disconnected);
+    match (process, api) {
+        (None, api) => api,
+        (Some(Ok(p)), _) if !quiet(&p) => Ok(p),
+        (Some(Ok(_)), Ok(a)) if !quiet(&a) => Ok(a),
+        (Some(Ok(p)), _) => Ok(p),
+        (Some(Err(_)), Ok(a)) => Ok(a),
+        (Some(Err(p)), Err(a)) => Err(format!("process model: {p}; lathe service: {a}")),
+    }
 }
 
 /// What the agent is about to do.
@@ -337,6 +380,43 @@ mod tests {
         assert_eq!(run_state_from_api(&body), Ok(RunState::Idle));
         assert!(run_state_from_api(&serde_json::json!({"session": {}})).is_err());
         assert!(run_state_from_api(&serde_json::json!({"session": {"run": 3}})).is_err());
+    }
+
+    #[test]
+    fn the_process_payloads_state_is_its_first_byte() {
+        let body = |b: u8| [b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        for (b, want) in [
+            (0, RunState::Idle),
+            (1, RunState::Homing),
+            (2, RunState::Running),
+            (3, RunState::Hold),
+            (4, RunState::Idle),
+            (5, RunState::Alarm),
+        ] {
+            assert_eq!(run_state_from_process(&body(b)), Ok(want), "{b}");
+        }
+        assert!(run_state_from_process(&body(6)).is_err());
+        assert!(run_state_from_process(&[0; 10]).is_err());
+    }
+
+    #[test]
+    fn the_busier_run_state_wins_and_the_service_is_the_fallback() {
+        use RunState::*;
+        let err = || Err::<RunState, String>("no".into());
+        assert_eq!(local_run_state(None, Ok(Running)), Ok(Running));
+        assert_eq!(local_run_state(Some(Ok(Running)), Ok(Idle)), Ok(Running));
+        assert_eq!(local_run_state(Some(Ok(Idle)), Ok(Hold)), Ok(Hold));
+        assert_eq!(local_run_state(Some(Ok(Idle)), err()), Ok(Idle));
+        assert_eq!(local_run_state(Some(Ok(Idle)), Ok(Disconnected)), Ok(Idle));
+        assert_eq!(local_run_state(Some(err()), Ok(Alarm)), Ok(Alarm));
+        assert_eq!(local_run_state(Some(err()), Ok(Idle)), Ok(Idle));
+        let both = local_run_state(Some(err()), err()).unwrap_err();
+        assert!(both.contains("process model") && both.contains("lathe service"));
+        // And the interlock defers on the busier one.
+        assert!(matches!(
+            interlock(Step::Reboot, &local_run_state(Some(Ok(Homing)), Ok(Idle))),
+            Gate::Defer(_)
+        ));
     }
 
     #[test]

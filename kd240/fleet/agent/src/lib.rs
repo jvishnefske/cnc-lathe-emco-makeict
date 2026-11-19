@@ -20,9 +20,13 @@
 //!
 //! A deferred order is reported and left for the next poll, and nothing
 //! after it runs first. The only things it reads from the lathe service are
-//! `GET /api/state`'s `session.run`. It sends the service nothing.
+//! `GET /api/state`'s `session.run` and, where the board runs the lathe's
+//! process payload, that payload's state over Zenoh ([`mesh`]); the
+//! interlock takes the busier ([`Agent::local_run_state`]). It sends the
+//! lathe nothing.
 #![forbid(unsafe_code)]
 
+pub mod mesh;
 pub mod system;
 pub mod telemetry;
 
@@ -39,8 +43,9 @@ use emco_fleet_proto::msg::{
     Telemetry,
 };
 use emco_fleet_proto::policy::{
-    accept_order, interlock, is_trial_boot, on_boot, run_state_from_api, stage_target, trial,
-    trial_outcome, Gate, Identity, RunState, Step, TrialOutcome,
+    accept_order, interlock, is_trial_boot, local_run_state as busier_run_state, on_boot,
+    run_state_from_api, run_state_from_process, stage_target, trial, trial_outcome, Gate, Identity,
+    RunState, Step, TrialOutcome,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -60,7 +65,13 @@ pub struct Config {
     pub state_dir: PathBuf,
     /// The lathe service's `GET /api/state`.
     pub local_state_url: String,
+    /// Reads the process payload's latest state publication
+    /// ([`mesh::read_state`]); `None` where the board runs none.
+    pub process_state: Option<ProcessStateReader>,
 }
+
+/// See [`Config::process_state`].
+pub type ProcessStateReader = Box<dyn Fn() -> Result<Vec<u8>, String> + Send>;
 
 /// What one slot holds, as far as this agent wrote and checked it.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -261,7 +272,28 @@ impl<S: System> Agent<S> {
     }
 
     /// The lathe service's run state, or why it is not known.
+    /// The run state the interlock decides on: the busier of the process
+    /// payload's and the lathe service's, the service's alone where there
+    /// is no payload or it cannot be heard
+    /// ([`emco_fleet_proto::policy::local_run_state`]).
     pub fn local_run_state(&self) -> Result<RunState, String> {
+        let process = self
+            .cfg
+            .process_state
+            .as_ref()
+            .map(|read| read().and_then(|b| run_state_from_process(&b)));
+        busier_run_state(process, self.api_run_state())
+    }
+
+    /// Replaces the process payload's state reader (tests, and a board
+    /// whose payload moved).
+    pub fn set_process_state(&mut self, read: Option<ProcessStateReader>) {
+        self.cfg.process_state = read;
+    }
+
+    /// The lathe service's own `session.run`: whether it answers is the
+    /// trial boot's health check.
+    pub fn api_run_state(&self) -> Result<RunState, String> {
         let mut resp = self
             .http
             .get(&self.cfg.local_state_url)
@@ -307,7 +339,7 @@ impl<S: System> Agent<S> {
         };
         let before = self.state.clone();
         let trying = is_trial_boot(state.as_ref(), booted);
-        let healthy = self.local_run_state();
+        let healthy = self.api_run_state();
         let mut now = state;
         if trying && healthy.is_err() {
             // Not proven: leave it uncommitted. The next reboot falls back.

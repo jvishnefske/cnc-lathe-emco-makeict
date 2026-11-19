@@ -18,6 +18,10 @@ ureq.workspace = true
 sha2 = "0.10"
 # fadvise(DONTNEED), so a slot is read back from the card, not the page cache.
 rustix = { version = "1", features = ["fs"] }
+# The process payload's run state over Zenoh, for the interlock
+# (src/mesh.rs), the release middleware's gateway is built with.
+zenoh = "=1.10.1"
+tokio = { workspace = true }
 
 [dev-dependencies]
 emco-fleet-server.workspace = true

@@ -17,7 +17,7 @@
 //! own belts), and compile ([`crate::compile`]); its motion is streamed in
 //! batches of at most the queue's free slots, one batch per queue report.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use cnc_model::wire::{self, CmState, PHASES};
 use cnc_model::{Limits, QueueState, Segment};
@@ -79,6 +79,8 @@ pub struct Process {
     reports: [Option<Report>; 6],
     cms: [Option<CmState>; 6],
     programs: BTreeMap<u32, Vec<u8>>,
+    /// Programs whose last chunk arrived, in order.
+    complete: BTreeSet<u32>,
     job: Job,
     phase: Option<(usize, Wait)>,
     next_id: u32,
@@ -99,6 +101,7 @@ impl Process {
             reports: [None; 6],
             cms: [None; 6],
             programs: BTreeMap::new(),
+            complete: BTreeSet::new(),
             job: Job::Idle,
             phase: None,
             next_id: 0,
@@ -266,8 +269,19 @@ impl Process {
         if offset == 0 {
             text.clear();
         }
+        if offset == 0 || head[8] == 0 {
+            self.complete.remove(&id);
+        }
+        // A program is whole once its last chunk arrives in order. A chunk
+        // out of order or over the budget leaves it incomplete until it is
+        // sent again from offset 0, so a lost chunk never runs a prefix.
         if offset == text.len() && others + text.len() + data.len() <= PROGRAM_BYTES {
             text.extend_from_slice(data);
+            if head[8] == 1 {
+                self.complete.insert(id);
+            }
+        } else {
+            self.complete.remove(&id);
         }
     }
 
@@ -305,6 +319,9 @@ impl Process {
         };
         if !self.referenced() {
             return self.fail("not referenced: reference the machine first (doc 40 §5)");
+        }
+        if self.programs.contains_key(&program) && !self.complete.contains(&program) {
+            return self.fail("the program is incomplete: send it again");
         }
         let Some(text) = self
             .programs
@@ -561,6 +578,30 @@ mod tests {
             p.publication(&own_key([9; 8], "program"), &c);
         }
         assert_eq!(p.programs.get(&4).map(Vec::len), Some(text.len()));
+    }
+
+    #[test]
+    fn a_program_with_a_chunk_missing_is_incomplete() {
+        let mut p = Process::new([9; 8], (0.0, -50.0));
+        let key = own_key([9; 8], "program");
+        let chunks = program_chunks(4, &"G0 X10 Z0\n".repeat(100));
+        assert!(chunks.len() > 2);
+        for (i, c) in chunks.iter().enumerate() {
+            if i != 1 {
+                p.publication(&key, c);
+            }
+        }
+        assert!(
+            !p.complete.contains(&4),
+            "a lost chunk leaves it incomplete"
+        );
+        for c in &chunks {
+            p.publication(&key, c);
+        }
+        assert!(p.complete.contains(&4));
+        // Starting it again makes it incomplete until its last chunk.
+        p.publication(&key, &chunks[0]);
+        assert!(!p.complete.contains(&4));
     }
 
     #[test]

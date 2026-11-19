@@ -38,6 +38,28 @@ in
       '';
     };
 
+    mesh = {
+      enable = mkEnableOption ''
+        the mesh transport: the UI drives the lathe's payloads on middleware
+        (--mesh) instead of the virtual machine. services.emco-mesh.ui sets
+        this up'';
+      router = mkOption {
+        type = types.str;
+        default = "tcp/127.0.0.1:7447";
+        description = "The Zenoh router (--mesh).";
+      };
+      belt = mkOption {
+        type = types.ints.between 1 3;
+        default = 2;
+        description = "The belt position fitted (--mesh-belt).";
+      };
+      environmentFile = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = "A file setting EMCO_MESH_PROCESS and EMCO_MESH_UNIT, the node ids.";
+      };
+    };
+
     openFirewall = mkOption {
       type = types.bool;
       default = true;
@@ -74,7 +96,9 @@ in
         StateDirectoryMode = "0750";
         ExecStart =
           "${lib.getExe cfg.package} --listen ${cfg.listen} --data ${state} --token-file ${state}/token"
-          + optionalString (cfg.rs485 != null) " --rs485 ${cfg.rs485}";
+          + optionalString (cfg.rs485 != null) " --rs485 ${cfg.rs485}"
+          + optionalString cfg.mesh.enable " --mesh ${cfg.mesh.router} --mesh-belt ${toString cfg.mesh.belt}";
+        EnvironmentFile = mkIf (cfg.mesh.enable && cfg.mesh.environmentFile != null) cfg.mesh.environmentFile;
         Restart = "on-failure";
         RestartSec = 2;
         # It reads one tty and writes only its state directory.

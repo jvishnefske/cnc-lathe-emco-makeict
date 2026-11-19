@@ -24,6 +24,13 @@ let
       ../../cnc/model/Cargo.toml
       ../../cnc/model/src
       ../../cnc/model/fixtures
+      # The process model's pure state machine, for tests/mesh_process.rs
+      # (a dev-dependency), and the screen rules it uses.
+      ../../cnc/process/Cargo.toml
+      ../../cnc/process/src
+      ../web/Cargo.toml
+      ../web/rules/Cargo.toml
+      ../web/rules/src
       ../../firmware/bridge-core/Cargo.toml
       ../../firmware/bridge-core/src
       ../../tools/emco-capture.py

@@ -29,6 +29,16 @@
   };
 
   outputs = { self, nixpkgs, nixpkgs-linuxcnc, flake-utils, rust-overlay, middleware }:
+    let
+      # The board's payload nodes (kd240/nix/mesh.nix): middleware's
+      # posix-node module and binary, and zenohd 1.10 from unstable (25.11
+      # has 1.4; the node's gateway is built with zenoh 1.10).
+      kd240Mesh = {
+        posixNodeModule = middleware.nixosModules.posix-node;
+        posixNode = middleware.packages.aarch64-linux.mw-posix-node;
+        zenohd = nixpkgs.legacyPackages.aarch64-linux.zenoh;
+      };
+    in
     {
       # The Kria KD240's SD card and its over-the-network updates
       # (kd240/nix/configuration.nix). On the stable release, like LinuxCNC:
@@ -41,6 +51,7 @@
         # platform, so the board's aarch64 service embeds this build. The
         # host is x86-64 Linux already, for the cross-compiled kernel.
         specialArgs.kd240Egui = self.packages.x86_64-linux.kd240-egui;
+        specialArgs.kd240Mesh = kd240Mesh;
       };
 
       # The same system on the A/B card layout (kd240/nix/ab.nix): a raw
@@ -52,6 +63,7 @@
       nixosConfigurations.kd240-ab = nixpkgs-linuxcnc.lib.nixosSystem {
         modules = [ ./kd240/nix/configuration.nix ./kd240/nix/ab.nix ];
         specialArgs.kd240Egui = self.packages.x86_64-linux.kd240-egui;
+        specialArgs.kd240Mesh = kd240Mesh;
       };
     } //
     flake-utils.lib.eachDefaultSystem (system:

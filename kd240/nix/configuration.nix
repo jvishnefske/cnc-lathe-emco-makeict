@@ -31,7 +31,7 @@
 # /boot, exactly where boot.scr points U-Boot, and the previous generations
 # stay selectable at the U-Boot menu (serial console) as the way back from
 # a bad update.
-{ config, lib, pkgs, modulesPath, kd240Egui, ... }:
+{ config, lib, pkgs, modulesPath, kd240Egui, kd240Mesh, ... }:
 
 let
   bootLabel = "KD240BOOT";
@@ -58,6 +58,9 @@ in
     "${modulesPath}/installer/sd-card/sd-image.nix"
     ./service.nix
     ./pl.nix
+    # The lathe's payload nodes (mesh.nix), on middleware's posix-node module.
+    ./mesh.nix
+    kd240Mesh.posixNodeModule
   ];
 
   nixpkgs.hostPlatform = "aarch64-linux";
@@ -233,6 +236,18 @@ in
     # service opens it read-only. The capture runs only when started from
     # the UI.
     rs485 = "/dev/ttyPS0";
+  };
+
+  # Plan M6: the physical model's node with the board's input-only driver
+  # (nothing it can drive moves the lathe), the process model's node, and
+  # zenohd on loopback (mesh.nix). The UI stays on the virtual machine and
+  # the fleet interlock on /api/state until payloads are installed:
+  # services.emco-mesh.ui and .fleetInterlock.
+  services.emco-mesh = {
+    enable = true;
+    posixNodePackage = kd240Mesh.posixNode;
+    zenohdPackage = kd240Mesh.zenohd;
+    driver = "kd240";
   };
 
   # Doc 65 S2: the PL loader, in check mode until there is a bitstream (an

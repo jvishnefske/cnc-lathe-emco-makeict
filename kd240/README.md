@@ -107,6 +107,29 @@ Bearer <token>`. `--no-auth` exists for a closed bench network. The token
 keeps a passer-by on the shop LAN from changing things. It does not make
 remote operation acceptable.
 
+### On the payloads (`--mesh`)
+
+With `--mesh ROUTER` the pump's transport is `MeshTransport`
+(`src/mesh.rs`) instead of the virtual machine: the UI drives the lathe's
+**process model** payload (`cnc/process`) and shows the **physical model**'s
+control modules (`cnc/physical`), both on `mw-posix-node`, over Zenoh
+through ROUTER. The UI, SSE and the egui screen are unchanged.
+
+```sh
+emco-kd240 --listen 0.0.0.0:8080 --data /var/lib/emco-kd240 --token-file token \
+           --mesh tcp/127.0.0.1:7447 --mesh-process <16 hex> --mesh-unit <16 hex> --mesh-belt 2
+```
+
+Home is the process model's reference, Run runs the loaded program with
+the belt given here (the UI has no belt control), Hold, Resume and Abort
+are the process model's. Jog, MDI, touch-off, single block, dry run and the
+training faults are refused with an alarm: the process model has none of
+them yet. Until the process model's state (a heartbeat every second) is
+heard, the run state is `disconnected`, and nothing that starts motion is
+sent; a unit silent for 3 s is an alarm. The process model is assigned the
+configured unit whenever it names another and is not busy. On the NixOS
+card this is `services.emco-kd240.mesh` (`nix/mesh.nix`), off by default.
+
 ## The SD card (NixOS), and updates over the network
 
 `nix/configuration.nix` is the board's whole system: NixOS 25.11 on the SD
@@ -203,7 +226,7 @@ machine. Without one, give the address: `just deploy admin@192.168.1.134`.
 | `GET /` | the UI |
 | `GET /egui/` | the emco_lathe screen (egui), when built in; otherwise a page saying how |
 | `GET /api/profile` | the `MachineProfile` |
-| `GET /api/state` | `{ session: SessionState, sim: Dro, transport: "virtual" }` |
+| `GET /api/state` | `{ session: SessionState, sim: Dro, transport: "virtual" }`; with `--mesh`, `{ session, transport: "mesh", mesh: { process, unit, belt, processState } }` |
 | `GET /api/events` | SSE: `state` (snapshots), `core` (the session's `Event`s), `lagged` (n missed) |
 | `GET /api/programs`, `GET/PUT/DELETE /api/programs/{name}` | stored programs (names `[A-Za-z0-9._-]`, ≤ 64, ≤ 1 MiB) |
 | `POST /api/programs/{name}/load` | parse and load: `{ name, lines, diagnostics, errors, backplot }`. 422 with errors, 409 while running |

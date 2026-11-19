@@ -5,6 +5,9 @@
 //!   default `sender/core`'s `Session` against its `VirtualMachine`, the only
 //!   machine the service runs, because the RS-485 protocol is unknown
 //!   (`docs/30-serial-protocol.md`).
+//! * [`mesh`] — a [`machine::Transport`] onto the lathe's S88 payloads on
+//!   middleware (`cnc/`), over Zenoh: the UI drives the process model and
+//!   shows the physical model's control modules (`--mesh`).
 //! * [`linuxcnc`] — a skeleton [`machine::Transport`] onto LinuxCNC's
 //!   status, command and error channels (doc 65 S4); not wired in yet.
 //! * [`capture`] — a listen-only RS-485 capture (read-only tty) in the
@@ -22,6 +25,7 @@ pub mod api;
 pub mod capture;
 pub mod linuxcnc;
 pub mod machine;
+pub mod mesh;
 pub mod parmrk;
 pub mod store;
 pub mod ui;

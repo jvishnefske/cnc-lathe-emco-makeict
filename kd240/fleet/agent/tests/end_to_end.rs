@@ -198,6 +198,7 @@ impl Fleet {
                 trusted: vec![self.public.clone()],
                 state_dir: self.dir.path().join("agent"),
                 local_state_url: lathe.to_string(),
+                process_state: None,
             },
             sys,
         )
@@ -918,6 +919,58 @@ fn reboot_rechecks_immediately_before_acting() {
     let (_, _, outcome, detail) = last_result(&a);
     assert_eq!(outcome, Outcome::Deferred);
     assert!(detail.contains("running"), "{detail}");
+}
+
+#[test]
+fn the_process_payload_and_the_service_must_both_say_idle() {
+    let f = fleet(true);
+    f.set_run("idle");
+    f.send(&f.command(21, Action::Reboot { bundle: None }));
+    let sys = FakeSystem::new();
+    let mut a = f.agent(sys.clone());
+    // The process payload's state publication: running (byte 2).
+    let state = Arc::new(Mutex::new(2u8));
+    let s = state.clone();
+    a.set_process_state(Some(Box::new(move || {
+        let mut b = vec![0u8; 11];
+        b[0] = *s.lock().unwrap();
+        Ok(b)
+    })));
+    a.poll_once().unwrap();
+    assert!(sys.log().is_empty(), "{:?}", sys.log());
+    let (_, _, outcome, detail) = last_result(&a);
+    assert_eq!(outcome, Outcome::Deferred);
+    assert!(detail.contains("running"), "{detail}");
+    // Done: the reboot goes ahead.
+    *state.lock().unwrap() = 4;
+    a.poll_once().unwrap();
+    assert_eq!(sys.log(), ["reboot"]);
+    drop(a);
+
+    // A payload that cannot be heard defers, even with the service idle.
+    f.send(&f.command(22, Action::Reboot { bundle: None }));
+    sys.power_on();
+    f.set_run("idle");
+    let mut a = f.agent(sys.clone());
+    a.set_process_state(Some(Box::new(|| Err("no router".into()))));
+    a.poll_once().unwrap();
+    assert!(!sys.log().iter().any(|l| l == "reboot"), "{:?}", sys.log());
+    let (_, _, outcome, detail) = last_result(&a);
+    assert_eq!(outcome, Outcome::Deferred);
+    assert!(detail.contains("no router"), "{detail}");
+    drop(a);
+    // And a payload saying idle does not outvote a service that cannot
+    // be asked.
+    let mut a = f.agent_with(
+        sys.clone(),
+        "dev-token",
+        &f.url,
+        "http://127.0.0.1:9/api/state",
+    );
+    a.set_process_state(Some(Box::new(|| Ok(vec![0u8; 11]))));
+    a.poll_once().unwrap();
+    assert!(!sys.log().iter().any(|l| l == "reboot"), "{:?}", sys.log());
+    assert_eq!(last_result(&a).2, Outcome::Deferred);
 }
 
 #[test]

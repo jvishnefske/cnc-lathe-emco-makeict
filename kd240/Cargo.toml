@@ -13,6 +13,13 @@ license = "MIT"
 [dependencies]
 emco-sender-core = { path = "../sender/core" }
 emco-bridge-core = { path = "../firmware/bridge-core" }
+# The process payload's wire and the unit's control-module states, for the
+# mesh transport (src/mesh.rs).
+cnc-model = { path = "../cnc/model" }
+# middleware's Zenoh backend, the one the node's gateway publishes with:
+# the mesh transport's bus (src/mesh/zenoh.rs). Same commit as cnc/.
+middleware = { git = "https://github.com/jvishnefske/middleware", rev = "514f9747c114f70058361db13365f5efd806775e", default-features = false, features = ["zenoh"] }
+zenoh = "1.10"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
@@ -22,6 +29,10 @@ serde_json = "1"
 rustix = { version = "1", default-features = false, features = ["std", "termios", "fs"] }
 
 [dev-dependencies]
+# The process model itself (its pure state machine, on the host), for the
+# test that the mesh transport and the process payload agree on the wire
+# (tests/mesh_process.rs). Not in the service's build.
+cnc-process = { path = "../cnc/process" }
 # A pseudo-terminal stands in for the RS-485 tty in the capture test.
 rustix = { version = "1", default-features = false, features = ["std", "termios", "fs", "pty"] }
 tower = { version = "0.5", features = ["util"] }

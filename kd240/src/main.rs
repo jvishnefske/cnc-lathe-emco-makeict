@@ -4,6 +4,8 @@
 use emco_kd240::api::{self, App};
 use emco_kd240::capture::Capture;
 use emco_kd240::machine::Machine;
+use emco_kd240::mesh::zenoh::ZenohBus;
+use emco_kd240::mesh::{MeshConfig, MeshTransport};
 use emco_kd240::store::Store;
 use emco_sender_core::profile::MachineProfile;
 use std::path::PathBuf;
@@ -12,6 +14,7 @@ use std::sync::Arc;
 const USAGE: &str = "\
 usage: emco-kd240 [--listen ADDR] [--data DIR] (--token-file FILE | --no-auth)
                   [--rs485 TTY] [--profile FILE]
+                  [--mesh ROUTER --mesh-process ID --mesh-unit ID --mesh-belt N]
 
   --listen ADDR      address to serve on (default 0.0.0.0:8080)
   --data DIR         programs and captures (default /var/lib/emco-kd240)
@@ -19,9 +22,17 @@ usage: emco-kd240 [--listen ADDR] [--data DIR] (--token-file FILE | --no-auth)
   --no-auth          serve changes without a token (a closed bench network only)
   --rs485 TTY        the KD240's RS-485 tty, opened READ-ONLY for capture
   --profile FILE     a MachineProfile JSON (default: the PC Turn 50's)
+  --mesh ROUTER      drive the lathe's payloads on middleware instead of the
+                     virtual machine, through the Zenoh router ROUTER
+                     (tcp/127.0.0.1:7447); see src/mesh.rs
+  --mesh-process ID  the process payload's node id, 16 hex digits
+                     (or EMCO_MESH_PROCESS)
+  --mesh-unit ID     the physical unit's node id (or EMCO_MESH_UNIT)
+  --mesh-belt N      the belt position fitted, 1 to 3 (or EMCO_MESH_BELT)
 
-The machine is sender/core's virtual machine: the RS-485 protocol is
-unknown (docs/30-serial-protocol.md) and nothing here transmits on the bus.";
+Without --mesh the machine is sender/core's virtual machine. Either way the
+RS-485 protocol is unknown (docs/30-serial-protocol.md) and nothing here
+transmits on the bus.";
 
 struct Args {
     listen: String,
@@ -30,6 +41,7 @@ struct Args {
     no_auth: bool,
     rs485: Option<PathBuf>,
     profile: Option<PathBuf>,
+    mesh: Option<(String, MeshConfig)>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -40,7 +52,15 @@ fn parse_args() -> Result<Args, String> {
         no_auth: false,
         rs485: None,
         profile: None,
+        mesh: None,
     };
+    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+    let (mut router, mut process, mut unit, mut belt) = (
+        None,
+        env("EMCO_MESH_PROCESS"),
+        env("EMCO_MESH_UNIT"),
+        env("EMCO_MESH_BELT"),
+    );
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         let mut val = || it.next().ok_or(format!("{arg} needs a value"));
@@ -51,12 +71,34 @@ fn parse_args() -> Result<Args, String> {
             "--no-auth" => a.no_auth = true,
             "--rs485" => a.rs485 = Some(val()?.into()),
             "--profile" => a.profile = Some(val()?.into()),
+            "--mesh" => router = Some(val()?),
+            "--mesh-process" => process = Some(val()?),
+            "--mesh-unit" => unit = Some(val()?),
+            "--mesh-belt" => belt = Some(val()?),
             "-h" | "--help" => return Err(String::new()),
             _ => return Err(format!("unknown argument {arg}")),
         }
     }
     if a.token_file.is_some() == a.no_auth {
         return Err("give exactly one of --token-file or --no-auth".into());
+    }
+    if let Some(router) = router {
+        let node = |what: &str, v: Option<String>| {
+            let v = v.ok_or(format!("--mesh needs --mesh-{what}"))?;
+            cnc_model::proc::parse_node(&v)
+                .ok_or(format!("--mesh-{what} {v:?} is not 16 hex digits"))
+        };
+        let belt = belt.ok_or("--mesh needs --mesh-belt (1, 2 or 3)")?;
+        let belt = match belt.trim().parse::<u8>() {
+            Ok(b @ 1..=3) => b,
+            _ => return Err(format!("--mesh-belt {belt:?} is not 1, 2 or 3")),
+        };
+        let cfg = MeshConfig {
+            process: node("process", process)?,
+            unit: node("unit", unit)?,
+            belt,
+        };
+        a.mesh = Some((router, cfg));
     }
     Ok(a)
 }
@@ -123,14 +165,30 @@ async fn run(args: Args) -> Result<(), String> {
         Store::open(args.data.join("programs")).map_err(|e| format!("program store: {e}"))?;
     let capture = Capture::new(args.rs485.clone(), args.data.join("captures"))
         .map_err(|e| format!("captures: {e}"))?;
-    let machine = Machine::spawn(profile.clone());
+    let machine = match &args.mesh {
+        None => Machine::spawn(profile.clone()),
+        Some((router, cfg)) => {
+            let bus = ZenohBus::connect(router, cfg.prefixes().to_vec())?;
+            let cfg = *cfg;
+            Machine::spawn_with(move || Box::new(MeshTransport::new(bus, cfg)))
+        }
+    };
     let app = Arc::new(App::new(machine, store, capture, profile, token));
     let listener = tokio::net::TcpListener::bind(&args.listen)
         .await
         .map_err(|e| format!("listen on {}: {e}", args.listen))?;
     eprintln!(
-        "emco-kd240 on http://{} — virtual machine only; RS-485 capture {}; auth {}",
+        "emco-kd240 on http://{} — {}; RS-485 capture {}; auth {}",
         args.listen,
+        match &args.mesh {
+            None => "virtual machine".to_string(),
+            Some((router, c)) => format!(
+                "the payloads on middleware via {router} (process {}, unit {}, belt {})",
+                cnc_model::proc::node_hex(c.process),
+                cnc_model::proc::node_hex(c.unit),
+                c.belt
+            ),
+        },
         args.rs485
             .as_ref()
             .map_or("off".into(), |p| format!("read-only on {}", p.display())),

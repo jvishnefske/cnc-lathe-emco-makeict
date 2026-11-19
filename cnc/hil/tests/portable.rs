@@ -22,7 +22,7 @@ use std::rc::Rc;
 
 use cnc_model::wire::{self, CmState};
 use cnc_model::PhysicalConfig;
-use cnc_process::process::{decode_state, own_key, program_chunks, Cmd, RunState};
+use cnc_process::process::{own_key, program_chunks, Cmd, ProcState, RunState};
 use middleware::transport::RequestMeta;
 use middleware::{Key, SenderId};
 use mw_posix_node::controller::Controller;
@@ -178,21 +178,21 @@ impl Rig<'_> {
         self.step_ms(1);
     }
 
-    fn state(&self) -> Option<(u8, String)> {
+    fn state(&self) -> Option<(RunState, String)> {
         let key = own_key(PROC.0, "state");
         self.seen
             .iter()
             .rev()
             .find(|o| o.key == key)
-            .and_then(|o| decode_state(&o.payload))
-            .map(|s| (s.0, s.4))
+            .and_then(|o| ProcState::decode(&o.payload))
+            .map(|s| (s.run, s.message))
     }
 
     fn until(&mut self, want: RunState, ms: u64) {
         for _ in 0..ms / 10 {
             match self.state() {
-                Some((s, _)) if s == want as u8 => return,
-                Some((s, m)) if s == RunState::Failed as u8 => panic!("failed: {m}"),
+                Some((s, _)) if s == want => return,
+                Some((RunState::Failed, m)) => panic!("failed: {m}"),
                 _ => self.step_ms(10),
             }
         }
@@ -262,7 +262,7 @@ fn run_on(cfg: &PhysicalConfig, physical: &str) -> (Vec<cnc_model::Segment>, (i3
         .encode(),
     );
     let (s, m) = r.state().unwrap();
-    assert_eq!(s, RunState::Failed as u8);
+    assert_eq!(s, RunState::Failed);
     assert!(m.contains("not referenced"), "{m}");
     r.operator("cmd", &Cmd::Clear.encode());
 

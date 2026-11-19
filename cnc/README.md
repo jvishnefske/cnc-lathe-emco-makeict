@@ -68,7 +68,11 @@ CNC_WRITE_FIXTURES=1 cargo test -p cnc-model   # after changing pc_turn_50()
 The process model talks to its unit only through publications: operator
 commands on `app/proc/<node>/cmd` (assign a unit, reference, run a program
 with the fitted belt, hold, resume, stop, clear), programs in chunks on
-`app/proc/<node>/program`, its state on `app/proc/<node>/state`. Programs
+`app/proc/<node>/program`, its state on `app/proc/<node>/state` (on
+every change and once a second, naming the unit it drives). The codecs
+are `cnc_model::proc`, so a tool that drives the process model (the
+KD240 service, the fleet agent) shares them without the payload's
+dependencies. Programs
 are held in memory for now; storing them in the node's kv needs a kv
 import the ABI does not have yet.
 

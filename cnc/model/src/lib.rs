@@ -8,6 +8,8 @@
 //! * [`wire`]: what the process model sends the physical model beside S88
 //!   phase commands (motion segments), and the control modules' published
 //!   states.
+//! * [`proc`]: the process model's own wire, for the tools that drive it
+//!   (operator commands, programs, its published state).
 //!
 //! `no_std`. The configuration's serde types and the batch encoder need
 //! `alloc` (the default feature); a payload without a heap turns it off
@@ -24,6 +26,8 @@ pub mod cm;
 #[cfg(feature = "alloc")]
 pub mod config;
 pub mod limits;
+#[cfg(feature = "alloc")]
+pub mod proc;
 pub mod wire;
 
 #[cfg(feature = "alloc")]

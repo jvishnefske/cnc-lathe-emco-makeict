@@ -37,72 +37,7 @@ const SPIN: usize = 3;
 const SPIN_STOP: usize = 4;
 const INDEX: usize = 5;
 
-/// An operator command (`app/proc/<node>/cmd`, [`Cmd::decode`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Cmd {
-    /// Drive the physical unit with this node id: `[1][node 8]`.
-    Assign([u8; 8]),
-    /// Reference the machine: `[2]`.
-    Reference,
-    /// Run a stored program with the belt the operator says is fitted:
-    /// `[3][program u32][belt u8]`.
-    Run { program: u32, belt: u8 },
-    /// Feed hold: `[4]`.
-    Hold,
-    /// Resume after a hold: `[5]`.
-    Resume,
-    /// Stop the job: `[6]`.
-    Stop,
-    /// Forget a finished or failed job: `[7]`.
-    Clear,
-}
-
-impl Cmd {
-    /// Decodes a command body.
-    pub fn decode(b: &[u8]) -> Option<Cmd> {
-        Some(match b {
-            [1, node @ ..] if node.len() == 8 => Cmd::Assign(node.try_into().ok()?),
-            [2] => Cmd::Reference,
-            [3, p0, p1, p2, p3, belt] => Cmd::Run {
-                program: u32::from_le_bytes([*p0, *p1, *p2, *p3]),
-                belt: *belt,
-            },
-            [4] => Cmd::Hold,
-            [5] => Cmd::Resume,
-            [6] => Cmd::Stop,
-            [7] => Cmd::Clear,
-            _ => return None,
-        })
-    }
-
-    /// Encodes it.
-    pub fn encode(&self) -> Vec<u8> {
-        match *self {
-            Cmd::Assign(n) => [&[1u8][..], &n].concat(),
-            Cmd::Reference => vec![2],
-            Cmd::Run { program, belt } => {
-                let p = program.to_le_bytes();
-                vec![3, p[0], p[1], p[2], p[3], belt]
-            }
-            Cmd::Hold => vec![4],
-            Cmd::Resume => vec![5],
-            Cmd::Stop => vec![6],
-            Cmd::Clear => vec![7],
-        }
-    }
-}
-
-/// What the process model is doing, as it publishes it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum RunState {
-    Idle = 0,
-    Referencing = 1,
-    Running = 2,
-    Held = 3,
-    Done = 4,
-    Failed = 5,
-}
+pub use cnc_model::proc::{own_key, program_chunks, Cmd, ProcState, RunState};
 
 /// Where a phase is in its Start / Reset handshake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -552,50 +487,30 @@ impl Process {
     }
 
     fn publish_state(&mut self) {
-        let (state, msg) = self.state();
-        let (program, at, ops) = match &self.job {
+        let (run, msg) = self.state();
+        let (program, op, ops) = match &self.job {
             Job::Program(p) => (p.id, p.at as u16, p.ops.len() as u16),
             _ => (0, 0, 0),
         };
-        let msg = msg.unwrap_or("").as_bytes();
-        let msg = &msg[..msg.len().min(200)];
-        let mut b = vec![state as u8];
-        b.extend_from_slice(&program.to_le_bytes());
-        b.extend_from_slice(&at.to_le_bytes());
-        b.extend_from_slice(&ops.to_le_bytes());
-        b.push(msg.len() as u8);
-        b.extend_from_slice(msg);
+        let b = ProcState {
+            run,
+            program,
+            op,
+            ops,
+            message: msg.unwrap_or("").to_owned(),
+            unit: self.unit,
+        }
+        .encode();
         if self.published.as_ref() != Some(&b) {
             self.published = Some(b.clone());
             self.out.push((own_key(self.node, "state"), b));
         }
     }
-}
 
-/// `app/proc/<node>/<what>`.
-pub fn own_key(node: [u8; 8], what: &str) -> String {
-    let hex: String = node.iter().map(|b| format!("{b:02x}")).collect();
-    format!("app/proc/{hex}/{what}")
-}
-
-/// A program as publications on `app/proc/<node>/program`: `[id u32][offset
-/// u32][last u8]` then up to 400 bytes each.
-pub fn program_chunks(id: u32, text: &str) -> Vec<Vec<u8>> {
-    let bytes = text.as_bytes();
-    let mut out = Vec::new();
-    let mut at = 0;
-    loop {
-        let n = (bytes.len() - at).min(400);
-        let mut b = Vec::with_capacity(9 + n);
-        b.extend_from_slice(&id.to_le_bytes());
-        b.extend_from_slice(&(at as u32).to_le_bytes());
-        b.push(u8::from(at + n == bytes.len()));
-        b.extend_from_slice(&bytes[at..at + n]);
-        out.push(b);
-        at += n;
-        if at == bytes.len() {
-            return out;
-        }
+    /// The periodic heartbeat: the next [`Process::take`] republishes the
+    /// state even if it has not changed (`cnc_model::proc`).
+    pub fn heartbeat(&mut self) {
+        self.published = None;
     }
 }
 
@@ -614,41 +529,28 @@ fn rules_machine(info: &Limits) -> Option<emco_rules::Machine> {
     })
 }
 
-/// A decoded state publication: `(state, program, op, ops, message)`.
-pub fn decode_state(b: &[u8]) -> Option<(u8, u32, u16, u16, String)> {
-    let (&[s, p0, p1, p2, p3, a0, a1, o0, o1, n], msg) = b.split_first_chunk::<10>()?;
-    (msg.len() == usize::from(n)).then(|| {
-        (
-            s,
-            u32::from_le_bytes([p0, p1, p2, p3]),
-            u16::from_le_bytes([a0, a1]),
-            u16::from_le_bytes([o0, o1]),
-            String::from_utf8_lossy(msg).into_owned(),
-        )
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn commands_round_trip() {
-        for c in [
-            Cmd::Assign([1, 2, 3, 4, 5, 6, 7, 8]),
-            Cmd::Reference,
-            Cmd::Run {
-                program: 7,
-                belt: 2,
-            },
-            Cmd::Hold,
-            Cmd::Resume,
-            Cmd::Stop,
-            Cmd::Clear,
-        ] {
-            assert_eq!(Cmd::decode(&c.encode()), Some(c));
-        }
-        assert_eq!(Cmd::decode(&[3, 0]), None);
+    fn the_state_names_the_unit_and_beats_when_unchanged() {
+        let mut p = Process::new([9; 8], (0.0, -50.0));
+        let state_key = own_key([9; 8], "state");
+        let states = |out: Vec<(String, Vec<u8>)>| -> Vec<ProcState> {
+            out.into_iter()
+                .filter(|(k, _)| *k == state_key)
+                .filter_map(|(_, b)| ProcState::decode(&b))
+                .collect()
+        };
+        let first = states(p.take());
+        assert_eq!(first.len(), 1);
+        assert_eq!((first[0].run, first[0].unit), (RunState::Idle, None));
+        assert!(states(p.take()).is_empty(), "unchanged, no beat yet");
+        p.heartbeat();
+        assert_eq!(states(p.take()), first);
+        p.publication(&own_key([9; 8], "cmd"), &Cmd::Assign([1; 8]).encode());
+        assert_eq!(states(p.take())[0].unit, Some([1; 8]));
     }
 
     #[test]

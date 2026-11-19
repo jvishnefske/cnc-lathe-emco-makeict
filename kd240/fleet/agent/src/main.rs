@@ -51,7 +51,8 @@ struct Args {
     local_state_url: String,
     /// The board's Zenoh router, where the lathe's process payload runs
     /// (`tcp/127.0.0.1:7447`); with --process-node, the interlock also
-    /// reads the payload's run state (read only).
+    /// reads the payload's run state (read only), and a reboot then needs
+    /// both it and the lathe service to say idle.
     #[arg(long, env = "FLEET_ZENOH_ROUTER", requires = "process_node")]
     zenoh_router: Option<String>,
     /// The process payload's node id, 16 hex digits.

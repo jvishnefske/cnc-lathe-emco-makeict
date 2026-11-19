@@ -11,9 +11,9 @@
 //!    while the lathe service reports `run` = `idle` or `disconnected`;
 //!    anything else, including "could not ask", defers it ([`interlock`]).
 //!    Where the board runs the lathe's process payload on middleware, its
-//!    run state (read over Zenoh) counts too, and the busier of the two
-//!    wins; the service's is the fallback when the payload cannot be heard
-//!    ([`local_run_state`]). The agent asks again immediately before it
+//!    run state (read over Zenoh) counts too, and the rule fails closed:
+//!    a reboot needs every source to answer quiet; one busy or one that
+//!    could not be asked defers it ([`local_run_state`]). The agent asks again immediately before it
 //!    acts.
 //! 3. The only slot ever written is the one this boot did not come from,
 //!    and only while this boot is the committed one ([`stage_target`]): a
@@ -97,22 +97,37 @@ pub fn run_state_from_process(body: &[u8]) -> Result<RunState, String> {
     })
 }
 
-/// The run state the interlock decides on: the process payload's
-/// (`process`, `None` where the board does not run one) and the lathe
-/// service's (`api`). The busier wins; a payload that cannot be heard falls
-/// back to the service; both unknown is unknown.
+/// The run state the interlock decides on, from the process payload's
+/// (`process`; `None` where the board runs none) and the lathe service's
+/// (`api`). It fails closed:
+///
+/// | process | api | result |
+/// |---------|-----|--------|
+/// | none | any | `api`, as before there were payloads |
+/// | busy | any | the process's (defers) |
+/// | quiet or error | busy | the api's (defers) |
+/// | error | quiet or error | an error (defers) |
+/// | quiet | error | an error (defers) |
+/// | quiet | quiet | the process's (`idle`) |
+///
+/// Quiet is `idle` or `disconnected`. So a spoofed or stale sample on the
+/// process key can only add a deferral, never take one away: the service
+/// must say quiet too.
 pub fn local_run_state(
     process: Option<Result<RunState, String>>,
     api: Result<RunState, String>,
 ) -> Result<RunState, String> {
     let quiet = |s: &RunState| matches!(s, RunState::Idle | RunState::Disconnected);
+    let Some(process) = process else {
+        return api;
+    };
     match (process, api) {
-        (None, api) => api,
-        (Some(Ok(p)), _) if !quiet(&p) => Ok(p),
-        (Some(Ok(_)), Ok(a)) if !quiet(&a) => Ok(a),
-        (Some(Ok(p)), _) => Ok(p),
-        (Some(Err(_)), Ok(a)) => Ok(a),
-        (Some(Err(p)), Err(a)) => Err(format!("process model: {p}; lathe service: {a}")),
+        (Ok(p), _) if !quiet(&p) => Ok(p),
+        (_, Ok(a)) if !quiet(&a) => Ok(a),
+        (Ok(p), Ok(_)) => Ok(p),
+        (Err(p), Err(a)) => Err(format!("process model: {p}; lathe service: {a}")),
+        (Err(p), Ok(_)) => Err(format!("process model: {p}")),
+        (Ok(_), Err(a)) => Err(format!("lathe service: {a}")),
     }
 }
 
@@ -400,23 +415,50 @@ mod tests {
     }
 
     #[test]
-    fn the_busier_run_state_wins_and_the_service_is_the_fallback() {
+    fn the_merge_fails_closed_row_by_row() {
         use RunState::*;
         let err = || Err::<RunState, String>("no".into());
+        let defers =
+            |r: &Result<RunState, String>| matches!(interlock(Step::Reboot, r), Gate::Defer(_));
+        // No payload: the service alone, as before.
+        assert_eq!(local_run_state(None, Ok(Idle)), Ok(Idle));
         assert_eq!(local_run_state(None, Ok(Running)), Ok(Running));
+        assert!(local_run_state(None, err()).is_err());
+        // Process busy: its state, whatever the service says.
         assert_eq!(local_run_state(Some(Ok(Running)), Ok(Idle)), Ok(Running));
+        assert_eq!(local_run_state(Some(Ok(Homing)), err()), Ok(Homing));
+        // Service busy: its state.
         assert_eq!(local_run_state(Some(Ok(Idle)), Ok(Hold)), Ok(Hold));
-        assert_eq!(local_run_state(Some(Ok(Idle)), err()), Ok(Idle));
-        assert_eq!(local_run_state(Some(Ok(Idle)), Ok(Disconnected)), Ok(Idle));
         assert_eq!(local_run_state(Some(err()), Ok(Alarm)), Ok(Alarm));
-        assert_eq!(local_run_state(Some(err()), Ok(Idle)), Ok(Idle));
-        let both = local_run_state(Some(err()), err()).unwrap_err();
-        assert!(both.contains("process model") && both.contains("lathe service"));
-        // And the interlock defers on the busier one.
-        assert!(matches!(
-            interlock(Step::Reboot, &local_run_state(Some(Ok(Homing)), Ok(Idle))),
-            Gate::Defer(_)
-        ));
+        // An error on either side, the other quiet: an error.
+        let e = local_run_state(Some(err()), Ok(Idle)).unwrap_err();
+        assert!(e.contains("process model"), "{e}");
+        let e = local_run_state(Some(Ok(Idle)), err()).unwrap_err();
+        assert!(e.contains("lathe service"), "{e}");
+        let e = local_run_state(Some(err()), err()).unwrap_err();
+        assert!(e.contains("process model") && e.contains("lathe service"));
+        // Both quiet: quiet.
+        assert_eq!(local_run_state(Some(Ok(Idle)), Ok(Disconnected)), Ok(Idle));
+        assert_eq!(
+            local_run_state(Some(Ok(Disconnected)), Ok(Idle)),
+            Ok(Disconnected)
+        );
+        // Only the last row lets a reboot through.
+        for (p, a, through) in [
+            (Some(Ok(Idle)), Ok(Idle), true),
+            (Some(Ok(Idle)), err(), false),
+            (Some(err()), Ok(Idle), false),
+            (Some(err()), err(), false),
+            (Some(Ok(Running)), Ok(Idle), false),
+            (Some(Ok(Idle)), Ok(Running), false),
+            (None, Ok(Idle), true),
+        ] {
+            assert_eq!(
+                !defers(&local_run_state(p.clone(), a.clone())),
+                through,
+                "{p:?} {a:?}"
+            );
+        }
     }
 
     #[test]

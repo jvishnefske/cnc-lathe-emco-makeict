@@ -7,6 +7,16 @@
 //! board's router, subscribes to `app/proc/<node>/state` and waits up to
 //! [`WAIT`] for one publication. It only listens: the agent sends the
 //! lathe nothing.
+//!
+//! **Any sample on that key is believed.** Publications are not
+//! authenticated (the same gap as the unit's commands): anything that can
+//! publish on the board's router can claim to be the process model. The
+//! interlock is built so that this can only *add* a deferral, never remove
+//! one: a reboot needs this state *and* the lathe service's to be quiet
+//! (`emco_fleet_proto::policy::local_run_state`), so a forged `idle` changes
+//! nothing and a forged `running` merely postpones an update. The board's
+//! zenohd listens on loopback only (kd240/nix/mesh.nix), so only the
+//! board's own processes can publish there.
 
 use std::time::Duration;
 

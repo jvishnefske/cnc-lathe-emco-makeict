@@ -21,8 +21,8 @@
 //! A deferred order is reported and left for the next poll, and nothing
 //! after it runs first. The only things it reads from the lathe service are
 //! `GET /api/state`'s `session.run` and, where the board runs the lathe's
-//! process payload, that payload's state over Zenoh ([`mesh`]); the
-//! interlock takes the busier ([`Agent::local_run_state`]). It sends the
+//! process payload, that payload's state over Zenoh ([`mesh`]); a reboot
+//! needs both to answer quiet ([`Agent::local_run_state`]). It sends the
 //! lathe nothing.
 #![forbid(unsafe_code)]
 
@@ -272,9 +272,9 @@ impl<S: System> Agent<S> {
     }
 
     /// The lathe service's run state, or why it is not known.
-    /// The run state the interlock decides on: the busier of the process
-    /// payload's and the lathe service's, the service's alone where there
-    /// is no payload or it cannot be heard
+    /// The run state the interlock decides on: the process payload's and
+    /// the lathe service's, failing closed (either busy or unknown defers),
+    /// the service's alone where the board runs no payload
     /// ([`emco_fleet_proto::policy::local_run_state`]).
     pub fn local_run_state(&self) -> Result<RunState, String> {
         let process = self

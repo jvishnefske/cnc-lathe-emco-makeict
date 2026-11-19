@@ -119,9 +119,42 @@ impl RunState {
     }
 }
 
+/// A program the process model holds whole: its id, length and
+/// [`program_hash`]. The state names the last one completed, so a tool
+/// that uploaded a program knows the process model has exactly that text
+/// before it asks to run it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoredProgram {
+    pub id: u32,
+    pub len: u32,
+    pub hash: u64,
+}
+
+impl StoredProgram {
+    /// The record for `text` stored as `id`.
+    pub fn of(id: u32, text: &[u8]) -> StoredProgram {
+        StoredProgram {
+            id,
+            len: text.len() as u32,
+            hash: program_hash(text),
+        }
+    }
+}
+
+/// FNV-1a, 64 bits, over a program's bytes: enough to tell one upload
+/// from another, not a defence against a forger (who could publish any
+/// state anyway; publications are not authenticated).
+pub fn program_hash(text: &[u8]) -> u64 {
+    text.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
 /// The process model's state (`app/proc/<node>/state`):
 /// `[run u8][program u32][op u16][ops u16][n u8][message n][assigned u8]`,
-/// then the unit's node id (8 bytes) when `assigned` is 1.
+/// then the unit's node id (8 bytes) when `assigned` is 1, then
+/// `[stored u8]` and, when it is 1, the last program completed
+/// (`[id u32][len u32][hash u64]`, [`StoredProgram`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcState {
     pub run: RunState,
@@ -134,6 +167,8 @@ pub struct ProcState {
     pub message: String,
     /// The physical unit it drives.
     pub unit: Option<[u8; 8]>,
+    /// The last program it received whole.
+    pub stored: Option<StoredProgram>,
 }
 
 impl ProcState {
@@ -158,6 +193,15 @@ impl ProcState {
             }
             None => b.push(0),
         }
+        match self.stored {
+            Some(p) => {
+                b.push(1);
+                b.extend_from_slice(&p.id.to_le_bytes());
+                b.extend_from_slice(&p.len.to_le_bytes());
+                b.extend_from_slice(&p.hash.to_le_bytes());
+            }
+            None => b.push(0),
+        }
         b
     }
 
@@ -169,9 +213,21 @@ impl ProcState {
             return None;
         }
         let (msg, tail) = rest.split_at(n);
-        let unit = match tail {
+        let (unit, tail) = match tail {
+            [0, rest @ ..] => (None, rest),
+            [1, rest @ ..] if rest.len() >= 8 => {
+                let (u, rest) = rest.split_at(8);
+                (Some(u.try_into().ok()?), rest)
+            }
+            _ => return None,
+        };
+        let stored = match tail {
             [0] => None,
-            [1, u @ ..] if u.len() == 8 => Some(u.try_into().ok()?),
+            [1, r @ ..] if r.len() == 16 => Some(StoredProgram {
+                id: u32::from_le_bytes(r[0..4].try_into().ok()?),
+                len: u32::from_le_bytes(r[4..8].try_into().ok()?),
+                hash: u64::from_le_bytes(r[8..16].try_into().ok()?),
+            }),
             _ => return None,
         };
         Some(ProcState {
@@ -181,6 +237,7 @@ impl ProcState {
             ops: u16::from_le_bytes([o0, o1]),
             message: String::from_utf8_lossy(msg).into_owned(),
             unit,
+            stored,
         })
     }
 }
@@ -262,6 +319,7 @@ mod tests {
                 ops: 0,
                 message: String::new(),
                 unit: None,
+                stored: None,
             },
             ProcState {
                 run: RunState::Failed,
@@ -270,6 +328,16 @@ mod tests {
                 ops: 12,
                 message: "not referenced".into(),
                 unit: Some([0x9a, 1, 2, 3, 4, 5, 6, 0xff]),
+                stored: Some(StoredProgram::of(9, b"M30\n")),
+            },
+            ProcState {
+                run: RunState::Done,
+                program: 0,
+                op: 0,
+                ops: 0,
+                message: String::new(),
+                unit: None,
+                stored: Some(StoredProgram::of(u32::MAX, b"")),
             },
         ] {
             assert_eq!(ProcState::decode(&s.encode()), Some(s));
@@ -281,15 +349,45 @@ mod tests {
             ops: 0,
             message: "é".repeat(150),
             unit: None,
+            stored: None,
         };
         let back = ProcState::decode(&s.encode()).unwrap();
         assert!(back.message.len() <= MAX_MESSAGE && back.message.ends_with('é'));
-        assert_eq!(ProcState::decode(&[9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), None);
-        assert_eq!(ProcState::decode(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), None);
+        let z = |tail: &[u8]| [&[0u8; 10][..], tail].concat();
+        assert!(ProcState::decode(&z(&[0, 0])).is_some());
         assert_eq!(
-            ProcState::decode(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1]),
+            ProcState::decode(&[&[9u8][..], &z(&[0, 0])[1..]].concat()),
             None
         );
+        assert_eq!(ProcState::decode(&z(&[])), None);
+        assert_eq!(ProcState::decode(&z(&[0])), None, "no stored flag");
+        assert_eq!(ProcState::decode(&z(&[1, 1])), None);
+        assert_eq!(ProcState::decode(&z(&[0, 1, 0])), None, "a short record");
+    }
+
+    /// The fleet agent reads the run state as the state's first byte
+    /// (kd240/fleet/proto/src/policy.rs, run_state_from_process), from a
+    /// workspace that does not depend on this crate: these are frozen.
+    #[test]
+    fn run_state_bytes_are_frozen() {
+        for (s, b) in [
+            (RunState::Idle, 0),
+            (RunState::Referencing, 1),
+            (RunState::Running, 2),
+            (RunState::Held, 3),
+            (RunState::Done, 4),
+            (RunState::Failed, 5),
+        ] {
+            assert_eq!(s as u8, b);
+            assert_eq!(RunState::from_u8(b), Some(s));
+        }
+    }
+
+    #[test]
+    fn program_hashes_tell_texts_apart() {
+        assert_eq!(program_hash(b""), 0xcbf2_9ce4_8422_2325);
+        assert_ne!(program_hash(b"G0 X1\n"), program_hash(b"G0 X2\n"));
+        assert_eq!(StoredProgram::of(3, b"M30\n").len, 4);
     }
 
     #[test]

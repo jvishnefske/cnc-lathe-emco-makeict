@@ -37,7 +37,7 @@ const SPIN: usize = 3;
 const SPIN_STOP: usize = 4;
 const INDEX: usize = 5;
 
-pub use cnc_model::proc::{own_key, program_chunks, Cmd, ProcState, RunState};
+pub use cnc_model::proc::{own_key, program_chunks, Cmd, ProcState, RunState, StoredProgram};
 
 /// Where a phase is in its Start / Reset handshake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +81,12 @@ pub struct Process {
     programs: BTreeMap<u32, Vec<u8>>,
     /// Programs whose last chunk arrived, in order.
     complete: BTreeSet<u32>,
+    /// When each program's upload started (an upload count), to forget the
+    /// oldest when the store is full.
+    started: BTreeMap<u32, u64>,
+    uploads: u64,
+    /// The last program received whole, as the state reports it.
+    stored: Option<StoredProgram>,
     job: Job,
     phase: Option<(usize, Wait)>,
     next_id: u32,
@@ -102,6 +108,9 @@ impl Process {
             cms: [None; 6],
             programs: BTreeMap::new(),
             complete: BTreeSet::new(),
+            started: BTreeMap::new(),
+            uploads: 0,
+            stored: None,
             job: Job::Idle,
             phase: None,
             next_id: 0,
@@ -254,7 +263,20 @@ impl Process {
         };
         let id = u32::from_le_bytes([head[0], head[1], head[2], head[3]]);
         let offset = u32::from_le_bytes([head[4], head[5], head[6], head[7]]) as usize;
-        if !self.programs.contains_key(&id) && self.programs.len() >= MAX_PROGRAMS {
+        let last = head[8] == 1;
+        if offset == 0 {
+            // A new upload. A full store forgets the program whose upload
+            // started longest ago (a running job has its operations
+            // compiled already).
+            if !self.programs.contains_key(&id) && self.programs.len() >= MAX_PROGRAMS {
+                if let Some((&old, _)) = self.started.iter().min_by_key(|(_, at)| **at) {
+                    self.forget(old);
+                }
+            }
+            self.uploads += 1;
+            self.started.insert(id, self.uploads);
+        }
+        if !self.programs.contains_key(&id) && offset != 0 {
             return;
         }
         // The budget is for all programs together, this one's old text
@@ -269,19 +291,33 @@ impl Process {
         if offset == 0 {
             text.clear();
         }
-        if offset == 0 || head[8] == 0 {
-            self.complete.remove(&id);
-        }
         // A program is whole once its last chunk arrives in order. A chunk
         // out of order or over the budget leaves it incomplete until it is
         // sent again from offset 0, so a lost chunk never runs a prefix.
-        if offset == text.len() && others + text.len() + data.len() <= PROGRAM_BYTES {
+        let appended = offset == text.len() && others + text.len() + data.len() <= PROGRAM_BYTES;
+        if appended {
             text.extend_from_slice(data);
-            if head[8] == 1 {
-                self.complete.insert(id);
-            }
+        }
+        let whole = appended && last;
+        let stored = whole.then(|| StoredProgram::of(id, text));
+        if whole {
+            self.complete.insert(id);
+            self.stored = stored;
         } else {
             self.complete.remove(&id);
+            if self.stored.is_some_and(|p| p.id == id) {
+                self.stored = None;
+            }
+        }
+    }
+
+    /// Drops a stored program.
+    fn forget(&mut self, id: u32) {
+        self.programs.remove(&id);
+        self.complete.remove(&id);
+        self.started.remove(&id);
+        if self.stored.is_some_and(|p| p.id == id) {
+            self.stored = None;
         }
     }
 
@@ -516,6 +552,7 @@ impl Process {
             ops,
             message: msg.unwrap_or("").to_owned(),
             unit: self.unit,
+            stored: self.stored,
         }
         .encode();
         if self.published.as_ref() != Some(&b) {
@@ -602,6 +639,48 @@ mod tests {
         // Starting it again makes it incomplete until its last chunk.
         p.publication(&key, &chunks[0]);
         assert!(!p.complete.contains(&4));
+    }
+
+    #[test]
+    fn the_state_names_the_last_program_received_whole() {
+        let mut p = Process::new([9; 8], (0.0, -50.0));
+        let key = own_key([9; 8], "program");
+        let text = "G0 X10 Z0\n".repeat(100);
+        let chunks = program_chunks(7, &text);
+        for c in &chunks {
+            p.publication(&key, c);
+        }
+        assert_eq!(p.stored, Some(StoredProgram::of(7, text.as_bytes())));
+        // A new upload of 7 that loses a chunk: no longer stored.
+        let other = "G0 X20 Z0\n".repeat(100);
+        for (i, c) in program_chunks(7, &other).iter().enumerate() {
+            if i != 1 {
+                p.publication(&key, c);
+            }
+        }
+        assert_eq!(p.stored, None);
+        // The state says so.
+        p.heartbeat();
+        let st = p
+            .take()
+            .into_iter()
+            .find(|(k, _)| k.ends_with("/state"))
+            .and_then(|(_, b)| ProcState::decode(&b))
+            .unwrap();
+        assert_eq!(st.stored, None);
+    }
+
+    #[test]
+    fn a_full_store_forgets_the_oldest_upload() {
+        let mut p = Process::new([9; 8], (0.0, -50.0));
+        let key = own_key([9; 8], "program");
+        for id in 1..=(MAX_PROGRAMS as u32 + 1) {
+            p.publication(&key, &program_chunks(id, "M30\n")[0]);
+        }
+        assert_eq!(p.programs.len(), MAX_PROGRAMS);
+        assert!(!p.programs.contains_key(&1), "the oldest went");
+        assert!(p.complete.contains(&(MAX_PROGRAMS as u32 + 1)));
+        assert_eq!(p.stored.map(|s| s.id), Some(MAX_PROGRAMS as u32 + 1));
     }
 
     #[test]

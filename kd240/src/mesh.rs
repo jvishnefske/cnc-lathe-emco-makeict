@@ -22,11 +22,18 @@
 //! | UI | process model |
 //! |----|---------------|
 //! | Home | Reference (after Clear, if the last job failed) |
-//! | Run | Run the program last loaded, with the belt the board is configured with ([`MeshConfig::belt`]) |
+//! | Run | Run the program last loaded, once the process model confirms it holds exactly that text, with the belt the board is configured with ([`MeshConfig::belt`]) |
 //! | Hold, Resume | Hold, Resume |
 //! | Abort | Stop |
 //! | single block, dry run, jog, MDI, touch-off | refused with an `UNSUPPORTED` alarm: the process model has none of them yet |
 //! | training faults | refused ([`Transport::fault`] is `false`): the unit's faults are its driver's |
+//!
+//! A program is **loaded** only once the process model confirms it: each
+//! load is uploaded under a fresh id, and the process model's state names
+//! the last program it received whole (id, length, hash,
+//! `cnc_model::proc::StoredProgram`). Run is refused until that matches
+//! the upload exactly, so a dropped chunk, a stale program kept under an
+//! old id, or a publication the bus dropped ([`Bus::failures`]) never runs.
 //!
 //! The process model is assigned the configured unit whenever its state
 //! names another (or none) and it is not busy, so a restarted process
@@ -44,7 +51,9 @@
 pub mod zenoh;
 
 use crate::machine::{Poll, Transport};
-use cnc_model::proc::{own_key, program_chunks, Cmd, ProcState, RunState as ProcRun};
+use cnc_model::proc::{
+    own_key, program_chunks, Cmd, ProcState, RunState as ProcRun, StoredProgram,
+};
 use cnc_model::wire::{self, CmState};
 use emco_sender_core::gcode::Program;
 use emco_sender_core::session::{AlarmInfo, Command, Dro, Event, RunState, SessionState};
@@ -56,10 +65,6 @@ pub const STALE_MS: f64 = 3000.0;
 const ASSIGN_EVERY_MS: f64 = 1000.0;
 /// Most publications taken from the bus in one poll.
 const MAX_PER_POLL: usize = 1024;
-/// The id the UI's program is stored under in the process model. One: the
-/// UI has one program loaded at a time, and reusing the id keeps the
-/// process model's store (16 programs) from filling up.
-pub const PROGRAM_ID: u32 = 1;
 /// The site's work zero, machine mm: the process payload's G54
 /// (`cnc/process/src/payload.rs`), for the work coordinates the DRO shows.
 pub const G54_MM: (f64, f64) = (0.0, -50.0);
@@ -71,6 +76,12 @@ pub trait Bus {
     fn publish(&mut self, key: &str, body: &[u8]) -> Result<(), String>;
     /// The next publication received on the subscribed keys, if any.
     fn try_recv(&mut self) -> Option<(String, Vec<u8>)>;
+    /// How many publications it accepted but then failed to send or dropped
+    /// (a count that only grows). A program uploaded before a failure is
+    /// not trusted to be whole.
+    fn failures(&self) -> u64 {
+        0
+    }
 }
 
 /// Which payloads to drive.
@@ -108,7 +119,12 @@ pub struct MeshTransport<B: Bus> {
     proc_seen_ms: Option<f64>,
     unit_seen_ms: Option<f64>,
     cms: [Option<CmState>; wire::CMS.len()],
-    loaded: bool,
+    /// The program last uploaded, as the process model must confirm it.
+    uploaded: Option<StoredProgram>,
+    /// The id the next upload gets.
+    next_id: u32,
+    /// [`Bus::failures`] when last looked at.
+    failures: u64,
     last_assign_ms: Option<f64>,
     last_run: Option<RunState>,
     pending: Vec<Event>,
@@ -130,12 +146,28 @@ impl<B: Bus> MeshTransport<B> {
             proc_seen_ms: None,
             unit_seen_ms: None,
             cms: [None; wire::CMS.len()],
-            loaded: false,
+            uploaded: None,
+            next_id: 1,
+            failures: 0,
             last_assign_ms: None,
             last_run: None,
             pending: Vec::new(),
             now_ms: 0.0,
         }
+    }
+
+    /// Starts program ids at `id` (the service seeds it from the clock, so
+    /// a restarted service does not reuse the ids of its last run; the
+    /// hash would catch it anyway).
+    pub fn with_program_ids_from(mut self, id: u32) -> Self {
+        self.next_id = id.max(1);
+        self
+    }
+
+    /// True once the process model holds exactly the program last
+    /// uploaded.
+    pub fn confirmed(&self) -> bool {
+        self.uploaded.is_some() && self.proc_state.as_ref().and_then(|s| s.stored) == self.uploaded
     }
 
     /// The bus, for tests.
@@ -357,8 +389,14 @@ impl<B: Bus + 'static> Transport for MeshTransport<B> {
                 self.send(&cmds);
             }
             Command::Run => {
-                if !self.loaded {
+                let Some(program) = self.uploaded else {
                     return self.alarm("NO-PROGRAM", "load a program first");
+                };
+                if !self.confirmed() {
+                    return self.alarm(
+                        "PROGRAM",
+                        "the process model has not confirmed the loaded program; load it again",
+                    );
                 }
                 if !self.assigned() {
                     return self.alarm(
@@ -368,7 +406,7 @@ impl<B: Bus + 'static> Transport for MeshTransport<B> {
                 }
                 let mut cmds = self.clear_if_failed();
                 cmds.push(Cmd::Run {
-                    program: PROGRAM_ID,
+                    program: program.id,
                     belt: self.cfg.belt,
                 });
                 self.send(&cmds);
@@ -390,13 +428,16 @@ impl<B: Bus + 'static> Transport for MeshTransport<B> {
 
     fn load(&mut self, p: &Program) {
         let text: String = p.lines.iter().map(|l| format!("{l}\n")).collect();
-        self.loaded = false;
-        for chunk in program_chunks(PROGRAM_ID, &text) {
+        self.uploaded = None;
+        let id = self.next_id;
+        self.next_id = self.next_id.checked_add(1).unwrap_or(1);
+        self.failures = self.bus.failures();
+        for chunk in program_chunks(id, &text) {
             if !self.publish("program", &chunk) {
                 return;
             }
         }
-        self.loaded = true;
+        self.uploaded = Some(StoredProgram::of(id, text.as_bytes()));
     }
 
     fn fault(&mut self, _kind: &'static str) -> bool {
@@ -410,6 +451,13 @@ impl<B: Bus + 'static> Transport for MeshTransport<B> {
                 break;
             };
             self.receive(&k, &b);
+        }
+        let failures = self.bus.failures();
+        if failures != self.failures {
+            self.failures = failures;
+            if self.uploaded.take().is_some() {
+                self.alarm("MESH", "a publication was dropped: load the program again");
+            }
         }
         self.maybe_assign();
         let state = self.session_state();
@@ -442,6 +490,11 @@ impl<B: Bus + 'static> Transport for MeshTransport<B> {
                     "process": hex(self.cfg.process),
                     "unit": hex(self.cfg.unit),
                     "belt": self.cfg.belt,
+                    "program": self.uploaded.map(|p| json!({
+                        "id": p.id,
+                        "len": p.len,
+                        "confirmed": self.confirmed(),
+                    })),
                     "processState": proc_,
                 },
             }),
@@ -469,6 +522,7 @@ mod tests {
         sent: Vec<(String, Vec<u8>)>,
         inbox: VecDeque<(String, Vec<u8>)>,
         refuse: bool,
+        failures: u64,
     }
 
     impl Bus for Fake {
@@ -481,6 +535,9 @@ mod tests {
         }
         fn try_recv(&mut self) -> Option<(String, Vec<u8>)> {
             self.inbox.pop_front()
+        }
+        fn failures(&self) -> u64 {
+            self.failures
         }
     }
 
@@ -497,6 +554,15 @@ mod tests {
     }
 
     fn proc_state(run: ProcRun, unit: Option<[u8; 8]>, message: &str) -> (String, Vec<u8>) {
+        stored_state(run, unit, message, None)
+    }
+
+    fn stored_state(
+        run: ProcRun,
+        unit: Option<[u8; 8]>,
+        message: &str,
+        stored: Option<StoredProgram>,
+    ) -> (String, Vec<u8>) {
         let s = ProcState {
             run,
             program: 0,
@@ -504,8 +570,22 @@ mod tests {
             ops: 0,
             message: message.into(),
             unit,
+            stored,
         };
         (own_key(PROC, "state"), s.encode())
+    }
+
+    /// The process model confirms `stored`.
+    fn confirm(m: &mut MeshTransport<Fake>, stored: Option<StoredProgram>, at: f64) -> Poll {
+        m.bus()
+            .inbox
+            .push_back(stored_state(ProcRun::Idle, Some(UNIT), "", stored));
+        m.bus().inbox.push_back(info());
+        m.poll(at)
+    }
+
+    fn text_of(p: &Program) -> String {
+        p.lines.iter().map(|l| format!("{l}\n")).collect()
     }
 
     fn cm(i: usize, s: CmState) -> (String, Vec<u8>) {
@@ -628,8 +708,8 @@ mod tests {
     }
 
     #[test]
-    fn a_program_is_uploaded_and_run_with_the_configured_belt() {
-        let mut m = mesh();
+    fn a_program_runs_once_the_process_model_confirms_it() {
+        let mut m = mesh().with_program_ids_from(40);
         up(&mut m, 0.0);
         m.command(Command::Run);
         assert!(cmds(&mut m).is_empty(), "nothing loaded");
@@ -643,18 +723,92 @@ mod tests {
             .filter(|(k, _)| *k == key)
             .map(|(_, b)| b.clone())
             .collect();
-        let text: String = p.lines.iter().map(|l| format!("{l}\n")).collect();
-        assert_eq!(chunks, program_chunks(PROGRAM_ID, &text));
+        let text = text_of(&p);
+        assert_eq!(chunks, program_chunks(40, &text));
+        // Not confirmed yet: refused.
+        m.command(Command::Run);
+        assert!(cmds(&mut m).is_empty());
+        let ev = m.poll(1.0).events;
+        assert!(ev.iter().any(|e| e["code"] == "NO-PROGRAM"));
+        assert!(ev.iter().any(|e| e["code"] == "PROGRAM"));
+        // Confirmed: Run names the upload's id.
+        let st = confirm(&mut m, Some(StoredProgram::of(40, text.as_bytes())), 2.0);
+        assert_eq!(st.state["mesh"]["program"]["confirmed"], true);
         m.command(Command::Run);
         assert_eq!(
             cmds(&mut m),
             vec![Cmd::Run {
-                program: PROGRAM_ID,
+                program: 40,
                 belt: 2
             }]
         );
-        let p = m.poll(5.0);
-        assert!(p.events.iter().any(|e| e["code"] == "NO-PROGRAM"));
+        // The next load gets a fresh id.
+        m.load(&Program::parse("M30\n"));
+        assert!(m
+            .bus()
+            .sent
+            .iter()
+            .all(|(_, b)| b[..4] == 41u32.to_le_bytes()));
+    }
+
+    #[test]
+    fn a_dropped_chunk_never_confirms() {
+        let mut m = mesh();
+        up(&mut m, 0.0);
+        let p = Program::parse(&"G0 X10 Z1\n".repeat(80));
+        m.load(&p);
+        // The process model lost a chunk: it holds no complete program
+        // (its state names none), or a different text under this id.
+        for (at, stored) in [
+            (1.0, None),
+            (3.0, Some(StoredProgram::of(1, b"G0 X10 Z1\n"))),
+        ] {
+            confirm(&mut m, stored, at);
+            m.command(Command::Run);
+            assert!(cmds(&mut m).is_empty());
+            let ev = m.poll(at + 1.0).events;
+            assert!(ev.iter().any(|e| e["code"] == "PROGRAM"), "{stored:?}");
+        }
+    }
+
+    #[test]
+    fn a_stale_confirmation_from_an_earlier_upload_does_not_count() {
+        let mut m = mesh();
+        up(&mut m, 0.0);
+        let first = Program::parse("G0 X1 Z1\nM30\n");
+        m.load(&first);
+        let old = StoredProgram::of(1, text_of(&first).as_bytes());
+        confirm(&mut m, Some(old), 1.0);
+        assert!(m.confirmed());
+        // A second load; the process model's state still names the first.
+        m.load(&Program::parse("G0 X2 Z1\nM30\n"));
+        confirm(&mut m, Some(old), 2.0);
+        assert!(!m.confirmed());
+        cmds(&mut m);
+        m.command(Command::Run);
+        assert!(cmds(&mut m).is_empty(), "the first program must not run");
+    }
+
+    #[test]
+    fn a_publication_the_bus_dropped_unloads_the_program() {
+        let mut m = mesh();
+        up(&mut m, 0.0);
+        let p = Program::parse("G0 X1 Z1\nM30\n");
+        m.load(&p);
+        let stored = StoredProgram::of(1, text_of(&p).as_bytes());
+        // The bus dropped one after accepting it.
+        m.bus().failures += 1;
+        let ev = confirm(&mut m, Some(stored), 1.0).events;
+        assert!(ev.iter().any(|e| e["code"] == "MESH"));
+        assert!(!m.confirmed());
+        cmds(&mut m);
+        m.command(Command::Run);
+        assert!(cmds(&mut m).is_empty());
+        // Loading again (no failure since) confirms.
+        m.load(&p);
+        let again = StoredProgram::of(2, text_of(&p).as_bytes());
+        confirm(&mut m, Some(again), 2.0);
+        assert!(m.confirmed());
     }
 
     #[test]
@@ -786,6 +940,7 @@ mod tests {
             ops: 1,
             message: String::new(),
             unit: Some(UNIT),
+            stored: None,
         };
         m.bus()
             .inbox

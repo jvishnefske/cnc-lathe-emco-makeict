@@ -170,7 +170,15 @@ async fn run(args: Args) -> Result<(), String> {
         Some((router, cfg)) => {
             let bus = ZenohBus::connect(router, cfg.prefixes().to_vec())?;
             let cfg = *cfg;
-            Machine::spawn_with(move || Box::new(MeshTransport::new(bus, cfg)))
+            // Program ids from the clock, so a restarted service does not
+            // reuse its last run's (the process model's hash check would
+            // still catch a reused one).
+            let first_id = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(1, |d| d.as_secs() as u32);
+            Machine::spawn_with(move || {
+                Box::new(MeshTransport::new(bus, cfg).with_program_ids_from(first_id))
+            })
         }
     };
     let app = Arc::new(App::new(machine, store, capture, profile, token));

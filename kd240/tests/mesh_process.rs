@@ -156,6 +156,14 @@ fn a_loaded_program_reaches_the_process_model_and_its_gate_answers() {
     r.unit_beat();
     r.step(10.0);
     r.ui.load(&Program::parse("G21 G90\nG00 X10 Z1\nG01 Z-5 F100\nM30\n"));
+    // Run before the process model has confirmed the upload: refused.
+    r.ui.command(Command::Run);
+    assert!(!r.ui.confirmed());
+    let s = r.step(10.0);
+    assert_eq!(s["session"]["run"], "idle", "nothing ran: {s}");
+    // Its state now names exactly that program.
+    assert!(r.ui.confirmed(), "{s}");
+    assert_eq!(s["mesh"]["program"]["confirmed"], true);
     r.ui.command(Command::Run);
     let s = r.step(10.0);
     // Not referenced: the process model's gate refuses, and the UI shows

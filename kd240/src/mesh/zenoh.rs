@@ -10,13 +10,15 @@
 //!
 //! Commands are not kept for later. Until the session is up, publishing
 //! is refused; a publication still queued after [`MAX_AGE`] is dropped
-//! rather than sent late.
+//! rather than sent late. Every publication dropped or failed after it was
+//! accepted is counted ([`Bus::failures`]), so the transport stops
+//! trusting a program upload that one of them belonged to.
 
 use super::Bus;
 use middleware::transport::{Publisher, Subscribe, Subscriber};
 use middleware::zenoh::{ZenohError, ZenohSubscriber, ZenohTransport};
 use middleware::{Key, KeyFilter};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc as amp;
@@ -35,6 +37,7 @@ pub struct ZenohBus {
     out: amp::UnboundedSender<Outgoing>,
     inbox: mpsc::Receiver<(String, Vec<u8>)>,
     up: Arc<AtomicBool>,
+    failures: Arc<AtomicU64>,
 }
 
 /// A client-mode Zenoh configuration connecting to `router` only.
@@ -81,6 +84,8 @@ impl ZenohBus {
         let (in_tx, inbox) = mpsc::channel();
         let up = Arc::new(AtomicBool::new(false));
         let flag = up.clone();
+        let failures = Arc::new(AtomicU64::new(0));
+        let failed = failures.clone();
         std::thread::Builder::new()
             .name("mesh-zenoh".into())
             .spawn(move || {
@@ -93,10 +98,15 @@ impl ZenohBus {
                     Ok(rt) => rt,
                     Err(e) => return eprintln!("mesh: no runtime: {e}"),
                 };
-                rt.block_on(serve(prefixes, open, out_rx, in_tx, flag));
+                rt.block_on(serve(prefixes, open, out_rx, in_tx, flag, failed));
             })
             .expect("spawn the mesh thread");
-        ZenohBus { out, inbox, up }
+        ZenohBus {
+            out,
+            inbox,
+            up,
+            failures,
+        }
     }
 
     /// True once the session is open and subscribed.
@@ -118,6 +128,10 @@ impl Bus for ZenohBus {
 
     fn try_recv(&mut self) -> Option<(String, Vec<u8>)> {
         self.inbox.try_recv().ok()
+    }
+
+    fn failures(&self) -> u64 {
+        self.failures.load(Ordering::Acquire)
     }
 }
 
@@ -145,6 +159,7 @@ async fn serve<F, Fut>(
     mut out: amp::UnboundedReceiver<Outgoing>,
     inbox: mpsc::Sender<(String, Vec<u8>)>,
     up: Arc<AtomicBool>,
+    failures: Arc<AtomicU64>,
 ) where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = Result<ZenohTransport, String>>,
@@ -190,11 +205,16 @@ async fn serve<F, Fut>(
     while let Some((at, key, body)) = out.recv().await {
         if at.elapsed() > MAX_AGE {
             eprintln!("mesh: dropped a stale publication on {key}");
+            failures.fetch_add(1, Ordering::AcqRel);
             continue;
         }
-        let Ok(k) = Key::new(&key) else { continue };
+        let Ok(k) = Key::new(&key) else {
+            failures.fetch_add(1, Ordering::AcqRel);
+            continue;
+        };
         if let Err(e) = t.publish(k, &body).await {
             eprintln!("mesh: publish {key}: {e}");
+            failures.fetch_add(1, Ordering::AcqRel);
         }
     }
     tasks.abort_all();

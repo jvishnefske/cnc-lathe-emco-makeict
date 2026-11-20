@@ -53,6 +53,8 @@ let
         });
       timeWaitSync = (s.systemd-time-wait-sync or { wantedBy = [ ]; }).wantedBy;
       zenohdVersion = c.services.emco-mesh.zenohdPackage.version;
+      node = unit "mw-posix-node";
+      nodeProcess = unit "mw-posix-node-process";
     };
 
   all = {
@@ -71,6 +73,10 @@ let
     oldZenohdOff = failedAssertions (extend [
       { services.emco-mesh.zenohdPackage = lib.mkForce (kd240.pkgs.zenoh // { version = "1.4.0"; }); }
     ]);
+    # The claim link, on and off whatever the board's default is.
+    claimOn = facts (extend [{ services.emco-mesh.claimLink.enable = lib.mkForce true; }]);
+    claimOff = facts (extend [{ services.emco-mesh.claimLink.enable = lib.mkForce false; }]);
+    boardClaimLink = kd240.config.services.emco-mesh.claimLink.enable;
   };
 in
 pkgs.runCommand "kd240-uplink-eval"
@@ -185,6 +191,37 @@ pkgs.runCommand "kd240-uplink-eval"
   check "on: the emco-mesh-uplink user" '.on.users == ["emco-mesh-uplink"]'
   check "on: the TLS dir, root:emco-mesh-uplink 0750" \
     '.on.tmpfiles == ["d /var/lib/emco-mesh 0755 root root -", "d /var/lib/emco-mesh/tls 0750 root emco-mesh-uplink -"]'
+
+  # ---- the claim link: a PTY and its daemon inside each node's unit
+  echo "claim link on the board: $(jq -r .boardClaimLink "$facts")"
+  check "claim: no failed assertions" '.claimOn.failedAssertions == []'
+  for n in node:unit nodeProcess:process; do
+    u=''${n%%:*} w=''${n#*:}
+    check "claim on: $u's MW_POSIX_NODE_LOCAL_SERIAL is /run/emco-mesh-claim-$w/tty" \
+      '.claimOn[$u].environment.MW_POSIX_NODE_LOCAL_SERIAL == "/run/emco-mesh-claim-\($w)/tty"' --arg u "$u" --arg w "$w"
+    check "claim on: $u's RuntimeDirectory is emco-mesh-claim-$w, 0700" \
+      '.claimOn[$u].serviceConfig | .RuntimeDirectory == "emco-mesh-claim-\($w)" and .RuntimeDirectoryMode == "0700"' \
+      --arg u "$u" --arg w "$w"
+    check "claim on: $u starts through the claim link wrapper, then the node as before" \
+      '.claimOn[$u].serviceConfig.ExecStart as $e | .claimOff[$u].serviceConfig.ExecStart as $plain
+       | ($e | test("^/nix/store/[a-z0-9]{32}-emco-mesh-claim-link ")) and ($e | endswith(" " + $plain))' --arg u "$u"
+    check "claim on: $u keeps PrivateDevices" '.claimOn[$u].serviceConfig.PrivateDevices == true' --arg u "$u"
+    check "claim off: $u has no MW_POSIX_NODE_LOCAL_SERIAL" \
+      '.claimOff[$u].environment | has("MW_POSIX_NODE_LOCAL_SERIAL") | not' --arg u "$u"
+    check "claim off: $u has no RuntimeDirectory" '.claimOff[$u].serviceConfig | has("RuntimeDirectory") | not' --arg u "$u"
+    check "claim off: $u runs the node directly" \
+      '.claimOff[$u].serviceConfig.ExecStart | test("^/nix/store/[a-z0-9]{32}-mw-posix-node-[^/]+/bin/mw-posix-node$")' --arg u "$u"
+    check "claim on: $u's other settings are as with it off" \
+      '[.claimOn, .claimOff] | map(.[$u].serviceConfig | del(.ExecStart, .RuntimeDirectory, .RuntimeDirectoryMode))
+       | .[0] == .[1]' --arg u "$u"
+  done
+  check "claim on: the two nodes have links of their own" \
+    '.claimOn.node.serviceConfig.RuntimeDirectory != .claimOn.nodeProcess.serviceConfig.RuntimeDirectory'
+  check "claim on: the process node keeps its own state" \
+    '.claimOn.nodeProcess.serviceConfig.StateDirectory == "mw-posix-node-process"'
+  check "claim: the local zenohd is untouched" '.claimOn.zenohd == .off.zenohd and .claimOff.zenohd == .off.zenohd'
+  check "claim: the board runs one of the two" \
+    'if .boardClaimLink then .off.node == .claimOn.node else .off.node == .claimOff.node end'
 
   # ---- assertions
   check "a tcp/ endpoint fails an assertion" '.badEndpoint | any(test("uplink.endpoint"))'

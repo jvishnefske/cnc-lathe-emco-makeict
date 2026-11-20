@@ -183,6 +183,12 @@
             kd240 = self.nixosConfigurations.kd240;
             zenohd = kd240Mesh.zenohdHost;
           };
+          # The claim link's PTY daemon (kd240/scripts/claim-link.py).
+          kd240-claim-link = pkgs.runCommand "kd240-claim-link"
+            { nativeBuildInputs = [ pkgs.python3 ]; } ''
+            python3 -I ${./kd240/nix/tests/claim_link.py} ${./kd240/scripts/claim-link.py}
+            touch $out
+          '';
           # emco-mesh-enroll (the board's key, CSR and certificate) against
           # a throwaway CA, as this host's build of the board's script.
           kd240-enroll = pkgs.runCommand "kd240-enroll"

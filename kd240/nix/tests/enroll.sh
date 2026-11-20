@@ -8,7 +8,7 @@
 # script runs on a temp dir (EMCO_ENROLL_DIR) with a fake ids file
 # (EMCO_MESH_IDS) and machine id (EMCO_MACHINE_ID).
 #
-#   kd240/tests/enroll.sh kd240/scripts/emco-mesh-enroll
+#   kd240/nix/tests/enroll.sh kd240/scripts/emco-mesh-enroll
 #   nix build .#checks.x86_64-linux.kd240-enroll -L    (the same, packaged)
 #
 # Needs openssl 3.4 or later (x509 -not_before/-not_after), bash, coreutils.

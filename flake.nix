@@ -173,8 +173,8 @@
           # a throwaway CA, as this host's build of the board's script.
           kd240-enroll = pkgs.runCommand "kd240-enroll"
             { nativeBuildInputs = [ pkgs.openssl pkgs.shellcheck ]; } ''
-            shellcheck ${./kd240/scripts/emco-mesh-enroll} ${./kd240/tests/enroll.sh}
-            bash ${./kd240/tests/enroll.sh} ${pkgs.callPackage ./kd240/nix/enroll.nix { }}/bin/emco-mesh-enroll
+            shellcheck ${./kd240/scripts/emco-mesh-enroll} ${./kd240/nix/tests/enroll.sh}
+            bash ${./kd240/nix/tests/enroll.sh} ${pkgs.callPackage ./kd240/nix/enroll.nix { }}/bin/emco-mesh-enroll
             touch $out
           '';
         };

@@ -31,17 +31,31 @@
   outputs = { self, nixpkgs, nixpkgs-linuxcnc, flake-utils, rust-overlay, middleware }:
     let
       # The board's payload nodes (kd240/nix/mesh.nix): middleware's
-      # posix-node module and binary, and zenohd 1.10 from unstable (25.11
-      # has 1.4; the node's gateway is built with zenoh 1.10).
-      kd240Mesh = {
-        posixNodeModule = middleware.nixosModules.posix-node;
-        posixNode = middleware.packages.aarch64-linux.mw-posix-node;
-        zenohd = nixpkgs.legacyPackages.aarch64-linux.zenoh;
-        # Which of the two the board gets, for the eval check to report,
-        # and the same zenohd for this host, for the config check to run.
-        zenohdSource = "nixpkgs";
-        zenohdHost = nixpkgs.legacyPackages.x86_64-linux.zenoh;
-      };
+      # posix-node module and binary, and zenohd 1.10 (the node's gateway is
+      # built with zenoh 1.10; 25.11 has 1.4).
+      #
+      # zenohd is middleware's static aarch64 build, cross-compiled here
+      # (packages.x86_64-linux.zenohd-aarch64, zenoh 1.10.1), once the pin
+      # has it (middleware f70ea67, W4b-0). Until then it is unstable's
+      # nixpkgs zenoh 1.10.0, from the cache. The eval check reports which
+      # (zenohdSource), and the config check runs the same one built for
+      # this host (zenohdHost).
+      kd240Mesh =
+        let
+          fromMiddleware = middleware.packages.x86_64-linux ? zenohd-aarch64;
+        in
+        {
+          posixNodeModule = middleware.nixosModules.posix-node;
+          posixNode = middleware.packages.aarch64-linux.mw-posix-node;
+          zenohd = middleware.packages.x86_64-linux.zenohd-aarch64
+            or nixpkgs.legacyPackages.aarch64-linux.zenoh;
+          zenohdSource =
+            if fromMiddleware then "middleware (zenohd-aarch64, static cross build)"
+            else "nixpkgs (fallback: the middleware pin has no zenohd-aarch64)";
+          zenohdHost =
+            if fromMiddleware then middleware.packages.x86_64-linux.zenohd
+            else nixpkgs.legacyPackages.x86_64-linux.zenoh;
+        };
     in
     {
       # The Kria KD240's SD card and its over-the-network updates

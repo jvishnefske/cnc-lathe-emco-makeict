@@ -22,6 +22,15 @@
 #                          directory and id
 #   emco-mesh-announce     mDNS: `_emco-lathe._tcp` on the UI's port, its TXT
 #                          naming both node ids (for M7's autoprobe)
+#   emco-mesh-uplink       (uplink.enable, W4b) a SECOND zenohd, with no
+#                          listener, linking the local router to the cloud
+#                          mesh over mTLS (tls/mesh.updates.<site>:443), its
+#                          default-deny ACL exporting the payloads' sys keys
+#                          and the process state and nothing of app/unit/**.
+#                          The local zenohd above is the same with it on or
+#                          off, so a bad certificate never touches the board's
+#                          own mesh. Its certificate: emco-mesh-enroll
+#                          (BRINGUP.md step 8).
 #
 # The payloads themselves are not in the image: they are signed and
 # installed per node with mwctl (cnc/README.md), so a fresh card runs both
@@ -74,6 +83,7 @@ let
       "unit=$UNIT" "process=$PROCESS" "zenoh=loopback"
   '';
   posixService = config.systemd.services.mw-posix-node;
+  up = cfg.uplink;
   needsIds = {
     after = [ "emco-mesh-ids.service" "zenohd.service" ];
     requires = [ "emco-mesh-ids.service" ];
@@ -141,6 +151,29 @@ in
       description = "The lathe service's port, as announced over mDNS.";
     };
 
+    uplink = {
+      enable = mkEnableOption "the router-to-router mTLS uplink to the cloud mesh (a second zenohd, emco-mesh-uplink)";
+
+      endpoint = mkOption {
+        type = types.str;
+        default = "tls/mesh.updates.vishnefske.com:443";
+        description = ''
+          The cloud mesh router, `tls/<host>:<port>`. The host must be the
+          name in the router certificate's SAN (zenoh verifies it).
+        '';
+      };
+
+      tlsDir = mkOption {
+        type = types.str;
+        default = "/var/lib/emco-mesh/tls";
+        description = ''
+          The uplink's certificate: `ca` (the Zenoh CA), `cert` (this
+          board's, CN kd240-<unit node id>) and `key` (made on the board by
+          `emco-mesh-enroll csr`; it never leaves it).
+        '';
+      };
+    };
+
     generated = mkOption {
       internal = true;
       readOnly = true;
@@ -164,6 +197,21 @@ in
       services.emco-mesh.generated = {
         inherit localConfig;
       };
+
+      assertions = [
+        {
+          assertion = !up.enable || lib.match "tls/[^/ ]+:[0-9]+" up.endpoint != null;
+          message = "services.emco-mesh.uplink.endpoint must be tls/<host>:<port> (mTLS only), not ${up.endpoint}";
+        }
+        {
+          assertion = !up.enable || lib.hasPrefix "/" up.tlsDir;
+          message = "services.emco-mesh.uplink.tlsDir must be an absolute path, not ${up.tlsDir}";
+        }
+        {
+          assertion = !up.enable || lib.versionAtLeast cfg.zenohdPackage.version "1.10";
+          message = "services.emco-mesh.uplink needs zenohd 1.10 or later (its ACL and TLS settings); zenohdPackage is ${cfg.zenohdPackage.version}";
+        }
+      ];
 
       systemd.services.zenohd = {
         description = "Zenoh router for the lathe's payload nodes (loopback only)";
@@ -246,6 +294,16 @@ in
         };
       };
     }
+
+    (mkIf up.enable {
+      users.users.emco-mesh-uplink = { isSystemUser = true; group = "emco-mesh-uplink"; };
+      users.groups.emco-mesh-uplink = { };
+      # The key is root's, readable by the uplink's group (emco-mesh-enroll).
+      systemd.tmpfiles.rules = [
+        "d /var/lib/emco-mesh 0755 root root -"
+        "d ${up.tlsDir} 0750 root emco-mesh-uplink -"
+      ];
+    })
 
     (mkIf cfg.ui {
       services.emco-kd240.mesh = {

@@ -165,7 +165,7 @@ pkgs.runCommand "kd240-uplink-eval"
     '.on.uplink.wants as $a | all("network-online.target", "time-sync.target"; . as $t | $a | index($t))'
   check "on: started at boot" '.on.uplink.wantedBy | index("multi-user.target")'
   check "on: ExecStartPre is emco-mesh-enroll check, as root" \
-    '.on.uplink.serviceConfig.ExecStartPre | test("^\+/nix/store/[^ ]+/bin/emco-mesh-enroll check")'
+    '.on.uplink.serviceConfig.ExecStartPre | test("^[+]/nix/store/[^ ]+/bin/emco-mesh-enroll check")'
   check "on: restarts on failure, without a start limit" \
     '.on.uplink.serviceConfig.Restart == "on-failure" and .on.uplink.unitConfig.StartLimitIntervalSec == 0'
   check "on: runs as emco-mesh-uplink" \

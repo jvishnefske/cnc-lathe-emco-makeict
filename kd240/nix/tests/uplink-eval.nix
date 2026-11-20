@@ -31,7 +31,9 @@ let
           unitConfig = plain u.unitConfig;
         }
       );
-      plain = lib.filterAttrs (_: v: builtins.isString v || builtins.isList v || builtins.isBool v || builtins.isInt v);
+      # Plain values, with a derivation (an ExecStart script) as its path.
+      plain = a: lib.filterAttrs (_: v: builtins.isString v || builtins.isList v || builtins.isBool v || builtins.isInt v)
+        (lib.mapAttrs (_: v: if lib.isDerivation v then "${v}" else v) a);
       g = c.services.emco-mesh.generated;
     in
     {

@@ -160,6 +160,15 @@ let
         { id = "uplink-allow"; rules = [ "cloud-queries-in" "cloud-subscribes-in" "board-queryables-out" "board-replies-out" "board-state-out" ]; subjects = [ "uplink" ]; }
       ];
     };
+  uplinkConfigFile = pkgs.writeText "zenohd-uplink.json5" (builtins.toJSON uplinkConfig);
+  enroll = pkgs.callPackage ./enroll.nix { inherit (up) tlsDir; };
+  expiry = pkgs.writeShellScript "emco-mesh-uplink-expiry" ''
+    if ! ${enroll}/bin/emco-mesh-enroll check --dir ${up.tlsDir}; then
+      echo "emco-mesh-uplink-expiry: the uplink's certificate fails its check: stopping emco-mesh-uplink (emco-mesh-enroll status)" >&2
+      systemctl stop emco-mesh-uplink.service
+      exit 1
+    fi
+  '';
   announce = pkgs.writeShellScript "emco-mesh-announce" ''
     set -eu
     . ${run}/ids
@@ -389,6 +398,60 @@ in
         "d /var/lib/emco-mesh 0755 root root -"
         "d ${up.tlsDir} 0750 root emco-mesh-uplink -"
       ];
+      environment.systemPackages = [ enroll ];
+
+      # The KD240 has no RTC: until timesyncd has synced, the clock is the
+      # last shutdown's (or the build's) and a certificate may look "not
+      # yet valid". time-sync.target waits for the sync, but not for ever:
+      # with no NTP for 5 minutes this unit fails (visibly) and the uplink's
+      # check says to look at the clock, retried every 2 minutes.
+      systemd.additionalUpstreamSystemUnits = [ "systemd-time-wait-sync.service" ];
+      systemd.services.systemd-time-wait-sync = {
+        wantedBy = [ "time-sync.target" ];
+        serviceConfig.TimeoutStartSec = "5min";
+      };
+
+      systemd.services.emco-mesh-uplink = {
+        description = "Zenoh uplink: the lathe's router to the cloud mesh (mTLS)";
+        wantedBy = [ "multi-user.target" ];
+        wants = [ "network-online.target" "time-sync.target" "zenohd.service" ];
+        after = [ "network-online.target" "time-sync.target" "zenohd.service" ];
+        unitConfig.StartLimitIntervalSec = 0;
+        serviceConfig = {
+          # As root (the key is 0640): no certificate, or a bad one, and
+          # the uplink does not start; the local zenohd is not touched.
+          ExecStartPre = "+${enroll}/bin/emco-mesh-enroll check --dir ${up.tlsDir}";
+          ExecStart = "${lib.getExe' cfg.zenohdPackage "zenohd"} --config ${uplinkConfigFile}";
+          User = "emco-mesh-uplink";
+          Group = "emco-mesh-uplink";
+          Restart = "on-failure";
+          RestartSec = "2min";
+          NoNewPrivileges = true;
+          ProtectSystem = "strict";
+          ProtectHome = true;
+          PrivateTmp = true;
+          PrivateDevices = true;
+          RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" "AF_NETLINK" ];
+          MemoryMax = "128M";
+        };
+      };
+
+      # A TLS session outlives its certificate, and once it drops the
+      # reconnects fail for ever with the unit still active. So once a day
+      # the same check runs, and a failing certificate stops the uplink
+      # (and fails this unit) instead: a visible stop, not a silent retry.
+      # `emco-mesh-enroll install` starts it again.
+      systemd.services.emco-mesh-uplink-expiry = {
+        description = "Stop the uplink when its certificate fails emco-mesh-enroll check";
+        serviceConfig = {
+          Type = "oneshot";
+          ExecStart = expiry;
+        };
+      };
+      systemd.timers.emco-mesh-uplink-expiry = {
+        wantedBy = [ "timers.target" ];
+        timerConfig.OnCalendar = "daily";
+      };
     })
 
     (mkIf cfg.ui {

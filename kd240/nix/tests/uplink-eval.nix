@@ -53,6 +53,8 @@ let
         });
       timeWaitSync = (s.systemd-time-wait-sync or { wantedBy = [ ]; }).wantedBy;
       zenohdVersion = c.services.emco-mesh.zenohdPackage.version;
+      socat = lib.any (p: (p.pname or "") == "socat") c.environment.systemPackages;
+      enroll = lib.any (p: (p.name or "") == "emco-mesh-enroll") c.environment.systemPackages;
       node = unit "mw-posix-node";
       nodeProcess = unit "mw-posix-node-process";
     };
@@ -188,6 +190,8 @@ pkgs.runCommand "kd240-uplink-eval"
   check "on: a daily expiry check" '.on.expiryTimer.OnCalendar == "daily" and (.on.expiryTimer.wantedBy | index("timers.target"))'
   check "on: which stops the uplink once the certificate fails" \
     '.on.expiry.serviceConfig.ExecStart | test("/nix/store/[^ ]+emco-mesh-uplink-expiry")'
+  check "on: emco-mesh-enroll on the board" '.on.enroll'
+  check "off: not without the uplink" '.off.enroll | not'
   check "on: the emco-mesh-uplink user" '.on.users == ["emco-mesh-uplink"]'
   check "on: the TLS dir, root:emco-mesh-uplink 0750" \
     '.on.tmpfiles == ["d /var/lib/emco-mesh 0755 root root -", "d /var/lib/emco-mesh/tls 0750 root emco-mesh-uplink -"]'
@@ -220,6 +224,8 @@ pkgs.runCommand "kd240-uplink-eval"
   check "claim on: the process node keeps its own state" \
     '.claimOn.nodeProcess.serviceConfig.StateDirectory == "mw-posix-node-process"'
   check "claim: the local zenohd is untouched" '.claimOn.zenohd == .off.zenohd and .claimOff.zenohd == .off.zenohd'
+  check "claim on: socat on the board (claim.sh's far end)" '.claimOn.socat'
+  check "claim off: and not without it" '.claimOff.socat | not'
   check "claim: the board runs one of the two" \
     'if .boardClaimLink then .off.node == .claimOn.node else .off.node == .claimOff.node end'
 

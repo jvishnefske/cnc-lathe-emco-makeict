@@ -189,10 +189,19 @@
             kd240 = self.nixosConfigurations.kd240;
             zenohd = kd240Mesh.zenohdHost;
           };
-          # The claim link's PTY daemon (kd240/scripts/claim-link.py).
+          # The claim link's PTY daemon (kd240/scripts/claim-link.py), and
+          # claim.sh through it and socat, with stand-ins for the node and
+          # mwctl.
           kd240-claim-link = pkgs.runCommand "kd240-claim-link"
-            { nativeBuildInputs = [ pkgs.python3 ]; } ''
+            { nativeBuildInputs = [ pkgs.python3 pkgs.socat pkgs.shellcheck ]; } ''
+            cp ${./kd240/nix/tests/claim_fakes.py} claim_fakes.py
+            cp ${./kd240/nix/tests/claim-smoke.sh} claim-smoke.sh
+            cp ${./kd240/scripts/claim.sh} claim.sh
+            chmod +x claim-smoke.sh claim.sh
+            patchShebangs claim-smoke.sh claim.sh
+            shellcheck claim.sh claim-smoke.sh
             python3 -I ${./kd240/nix/tests/claim_link.py} ${./kd240/scripts/claim-link.py}
+            ./claim-smoke.sh ${./kd240/scripts/claim-link.py} ./claim.sh
             touch $out
           '';
           # emco-mesh-enroll (the board's key, CSR and certificate) against

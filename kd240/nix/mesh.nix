@@ -448,6 +448,11 @@ in
       };
     }
 
+    (mkIf claim {
+      # For claim.sh: `sudo socat - UNIX-CONNECT:/run/emco-mesh-claim-*/sock`.
+      environment.systemPackages = [ pkgs.socat ];
+    })
+
     (mkIf up.enable {
       users.users.emco-mesh-uplink = { isSystemUser = true; group = "emco-mesh-uplink"; };
       users.groups.emco-mesh-uplink = { };

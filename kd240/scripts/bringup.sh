@@ -28,7 +28,7 @@ HELP="usage: bringup.sh [options]
   --list                list the steps and exit
   --device DEV          step 1 --apply: also write the image to this whole
                         card (just flash, which asks before writing)
-  --key FILE            steps 2/3: an Ed25519 key file for mwctl
+  --key FILE            steps 2/3: an mwctl key file (claims the nodes, signs)
   --pkcs11 LABEL        steps 2/3: a PKCS#11 key for mwctl instead
   --tunnel-port PORT    step 3: local end of the SSH tunnel to the board's
                         loopback zenohd [17447]
@@ -218,24 +218,67 @@ step1() {
 step2() {
     local r=0
     say "two separate trusts (BRINGUP.md, step 2):"
-    say "  a. each mw-posix-node pins its owner's key: mwctl --port <LOCAL PORT> trust claim --key K"
+    say "  a. each mw-posix-node pins its owner's key, over its claim link:"
+    say "     kd240/scripts/claim.sh <unit|process> --host $host (--key K | --pkcs11 L)"
     say "  b. the fleet agent obeys orders signed by trustedKeys (emco-fleet pubkey / keygen)"
     board_up || return 1
 
-    # a. The node claim needs the node's local serial port: a claim never
-    # passes gw/sys or Zenoh (middleware README, "Linux payload host").
-    local env_unit env_proc
-    env_unit=$(unit_env mw-posix-node)
-    env_proc=$(unit_env mw-posix-node-process)
-    if printf '%s %s' "$env_unit" "$env_proc" | grep -q MW_POSIX_NODE_LOCAL_SERIAL \
-        || on_board grep -qs MW_POSIX_NODE_LOCAL_SERIAL /var/lib/mw-robot/robot.env; then
-        ok "a local serial port is configured for a node"
-        key_args
-        would "mwctl --port <that port> trust claim ${KEYARGS[*]:-<--key FILE | --pkcs11 LABEL>}   (on the board)"
-        todo "run the claim on the board for each node: this script does not forward a serial port"
-    else
-        gap "neither node has MW_POSIX_NODE_LOCAL_SERIAL (mesh.nix sets none): no way to claim them yet"
-        r=2
+    # a. A claim never passes gw/sys or Zenoh: it goes over the node's local
+    # serial link, which the claim link (services.emco-mesh.claimLink) makes
+    # a PTY in the node's unit, with a root-only socket beside it.
+    key_args
+    local w u env sock links=0
+    for w in unit process; do
+        u=mw-posix-node
+        [ "$w" = process ] && u=mw-posix-node-process
+        env=$(unit_env "$u")
+        sock=/run/emco-mesh-claim-$w/sock
+        if ! printf '%s' "$env" | grep -q "MW_POSIX_NODE_LOCAL_SERIAL=/run/emco-mesh-claim-$w/tty"; then
+            gap "$u: no claim link (services.emco-mesh.claimLink; on once the middleware pin opens a PTY: flake.nix ptyLocalSerial)"
+            continue
+        fi
+        if on_board sudo test -S "$sock"; then
+            ok "$u: claim link $sock"
+            links=$((links + 1))
+        else
+            bad "$u: MW_POSIX_NODE_LOCAL_SERIAL is set but $sock is missing (journalctl -u $u: emco-mesh-claim-link)"
+            r=1
+        fi
+    done
+    if [ "$links" -eq 0 ] && [ "$r" -eq 0 ]; then r=2; fi
+    if [ "$links" -gt 0 ]; then
+        if ! have mwctl || ! have socat; then
+            bad "claim.sh needs mwctl and socat here"; r=1
+        else
+            for w in unit process; do
+                on_board sudo test -S "/run/emco-mesh-claim-$w/sock" || continue
+                local info state
+                info=$("$root/kd240/scripts/claim.sh" "$w" --host "$host" --user "$user" --info 2>&1) || {
+                    bad "$w node: trust info over the claim link failed:"
+                    printf '%s\n' "$info" | sed 's/^/        /'
+                    r=1; continue
+                }
+                state=$(printf '%s\n' "$info" | sed -n 's/^trust: *//p' | head -1)
+                case "$state" in
+                    unclaimed*)
+                        say "$w node: unclaimed"
+                        would "kd240/scripts/claim.sh $w --host $host --user $user ${KEYARGS[*]:-<--key FILE | --pkcs11 LABEL>}"
+                        if [ -n "$apply" ]; then
+                            if [ ${#KEYARGS[@]} -eq 0 ]; then
+                                bad "--apply needs --key FILE or --pkcs11 LABEL to claim"; r=1
+                            elif "$root/kd240/scripts/claim.sh" "$w" --host "$host" --user "$user" "${KEYARGS[@]}"; then
+                                ok "$w node claimed"
+                            else
+                                bad "$w node: claim failed"; r=1
+                            fi
+                        elif [ "$r" -eq 0 ]; then
+                            r=1
+                        fi ;;
+                    claimed*) ok "$w node: $state" ;;
+                    *) bad "$w node: no trust state in: $info"; r=1 ;;
+                esac
+            done
+        fi
     fi
 
     # b. The fleet agent and its trusted keys (nix/fleet.nix): only on the

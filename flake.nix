@@ -160,6 +160,14 @@
             kd240 = self.nixosConfigurations.kd240;
             inherit (kd240Mesh) zenohdSource;
           };
+          # emco-mesh-enroll (the board's key, CSR and certificate) against
+          # a throwaway CA, as this host's build of the board's script.
+          kd240-enroll = pkgs.runCommand "kd240-enroll"
+            { nativeBuildInputs = [ pkgs.openssl pkgs.shellcheck ]; } ''
+            shellcheck ${./kd240/scripts/emco-mesh-enroll} ${./kd240/tests/enroll.sh}
+            bash ${./kd240/tests/enroll.sh} ${pkgs.callPackage ./kd240/nix/enroll.nix { }}/bin/emco-mesh-enroll
+            touch $out
+          '';
         };
 
         apps.sim = dockerApp "emco-sim" ''

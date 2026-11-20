@@ -285,6 +285,26 @@ E-stop flag: an `ESTOP` alarm counts as E-stop until Abort resets the
 machine. Proven programs are remembered per browser (`localStorage`), not in
 `~/.config`.
 
+## Bring-up
+
+[`BRINGUP.md`](BRINGUP.md) lists the steps from a fresh card to a board
+running the payloads: flash, claim and trust, the payloads, the `ui` and
+`fleetInterlock` options, the sim bench test, cyclictest, the RS-485 DE
+and GPIO inputs, and the uplink certificate. `scripts/bringup.sh` runs
+them. Each step only checks unless you pass `--apply`. Things for the
+KD240 itself that the repository doesn't provide yet:
+
+* The nodes can't be claimed. Neither has a local port
+  (`MW_POSIX_NODE_LOCAL_SERIAL`).
+* mwctl can't reach them over the loopback zenohd, because posix-node
+  serves no `sys/*` keys over Zenoh (W4a).
+* The physical payload's binding names the simulator's points, so it
+  binds only with `driver = "sim"`.
+* `mw-posix-node` has no access to `/dev/gpiochip*`, and no input pin map
+  exists.
+* `fleetInterlock` does nothing on the default `kd240` configuration,
+  which has no fleet agent.
+
 ## Not done yet
 
 * **On hardware:** the service runs on the KD240 under NixOS (both UIs,

@@ -156,7 +156,7 @@ v = json.load(sys.stdin)
 for k in sys.argv[1].split("."):
     v = v.get(k) if isinstance(v, dict) else None
 print("" if v is None else (v if isinstance(v, str) else json.dumps(v)))
-' "$1"
+' "$1" || true
 }
 
 # ------------------------------------------------------------ step 1
@@ -192,10 +192,14 @@ step1() {
         if on_board systemctl is-active --quiet "$u"; then ok "$u active"; else bad "$u not active"; r=1; fi
     done
     if read_ids; then ok "node ids: unit $UNIT, process $PROCESS"; else bad "/run/emco-mesh/ids missing"; r=1; fi
-    if on_board ss -Hltn 'sport = :7447' 2>/dev/null | grep -q '127.0.0.1:7447'; then
-        ok "zenohd listens on 127.0.0.1:7447 only"
-    else
+    local listen
+    listen=$(on_board ss -Hltn 'sport = :7447' 2>/dev/null | awk '{print $4}') || listen=""
+    if [ -z "$listen" ]; then
         bad "zenohd is not listening on 127.0.0.1:7447"; r=1
+    elif printf '%s\n' "$listen" | grep -qvx '127.0.0.1:7447'; then
+        bad "port 7447 is not loopback only: $(printf '%s' "$listen" | paste -sd' ' -)"; r=1
+    else
+        ok "zenohd listens on 127.0.0.1:7447 only"
     fi
     if have avahi-browse; then
         if avahi-browse -rtp _emco-lathe._tcp 2>/dev/null | grep -q '^='; then
@@ -282,11 +286,17 @@ close_tunnel() {
 trap close_tunnel EXIT
 
 open_tunnel() {
+    if (exec 3<>"/dev/tcp/127.0.0.1/$tunnel_port") 2>/dev/null; then
+        bad "127.0.0.1:$tunnel_port is already in use (a leftover tunnel?): pick --tunnel-port"
+        return 1
+    fi
     ssh -o BatchMode=yes -o ExitOnForwardFailure=yes -N \
         -L "127.0.0.1:$tunnel_port:127.0.0.1:7447" "$target" </dev/null &
     tunnel_pid=$!
     for _ in 1 2 3 4 5 6 7 8 9 10; do
-        if (exec 3<>"/dev/tcp/127.0.0.1/$tunnel_port") 2>/dev/null; then return 0; fi
+        if (exec 3<>"/dev/tcp/127.0.0.1/$tunnel_port") 2>/dev/null && kill -0 "$tunnel_pid" 2>/dev/null; then
+            return 0
+        fi
         kill -0 "$tunnel_pid" 2>/dev/null || break
         sleep 0.5
     done
@@ -393,7 +403,9 @@ step4() {
     if board_up; then
         if on_board systemctl show emco-kd240 -p ExecStart --value 2>/dev/null | grep -q -- '--mesh'; then
             ok "emco-kd240 runs with --mesh"
-            [ "$(state_field transport)" = mesh ] && ok "GET /api/state: transport mesh"
+            local tr
+            tr=$(state_field transport)
+            if [ "$tr" = mesh ]; then ok "GET /api/state: transport mesh"; else bad "GET /api/state: transport ${tr:-no answer} (want mesh)"; r=1; fi
         else
             say "emco-kd240 runs on its virtual machine (no --mesh)"; r=1
         fi
@@ -412,7 +424,9 @@ step4() {
     would "just -f kd240/justfile deploy $target"
     if [ -n "$apply" ]; then
         just -f "$root/kd240/justfile" deploy "$target" || { bad "deploy failed"; return 1; }
-        r=0
+        say "deployed; checking again"
+        apply="" step4
+        return $?
     fi
     return "$r"
 }
@@ -424,7 +438,7 @@ step5() {
     say "needs: services.emco-mesh.driver = \"sim\" and ui = true deployed, payloads running (step 3)"
     board_up || return 1
     local drv
-    drv=$(unit_env mw-posix-node | grep -o 'MW_POSIX_NODE_DRIVER=[a-z0-9]*' | cut -d= -f2)
+    drv=$(unit_env mw-posix-node | grep -o 'MW_POSIX_NODE_DRIVER=[a-z0-9]*' | cut -d= -f2) || drv=
     if [ "$drv" = sim ]; then ok "physical node driver: sim"; else bad "physical node driver: ${drv:-?} (want sim for the bench test)"; r=1; fi
     if on_board journalctl -b -u mw-posix-node --no-pager -o cat 2>/dev/null | grep -q 'driver sim'; then
         ok "mw-posix-node logged its sim driver"

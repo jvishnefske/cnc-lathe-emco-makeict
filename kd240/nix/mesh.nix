@@ -58,14 +58,15 @@ let
     chmod 0644 ${run}/*
     echo "emco-mesh: unit $unit, process $proc"
   '';
-  zenohdConfig = pkgs.writeText "zenohd.json5" (builtins.toJSON {
+  localConfig = {
     mode = "router";
     listen.endpoints = [ router ];
     scouting.multicast.enabled = false;
     scouting.gossip.enabled = false;
     # No plugins (no REST, no storage): a router and nothing else.
     plugins_loading.enabled = false;
-  });
+  };
+  zenohdConfig = pkgs.writeText "zenohd.json5" (builtins.toJSON localConfig);
   announce = pkgs.writeShellScript "emco-mesh-announce" ''
     set -eu
     . ${run}/ids
@@ -140,6 +141,13 @@ in
       description = "The lathe service's port, as announced over mDNS.";
     };
 
+    generated = mkOption {
+      internal = true;
+      readOnly = true;
+      type = types.attrs;
+      description = "The zenohd configurations this module generates, for the eval check (nix/tests/uplink-eval.nix).";
+    };
+
     fleetInterlock = mkOption {
       type = types.bool;
       default = false;
@@ -153,6 +161,10 @@ in
 
   config = mkIf cfg.enable (lib.mkMerge [
     {
+      services.emco-mesh.generated = {
+        inherit localConfig;
+      };
+
       systemd.services.zenohd = {
         description = "Zenoh router for the lathe's payload nodes (loopback only)";
         wantedBy = [ "multi-user.target" ];

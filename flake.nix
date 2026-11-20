@@ -37,6 +37,8 @@
         posixNodeModule = middleware.nixosModules.posix-node;
         posixNode = middleware.packages.aarch64-linux.mw-posix-node;
         zenohd = nixpkgs.legacyPackages.aarch64-linux.zenoh;
+        # Which of the two the board gets, for the eval check to report.
+        zenohdSource = "nixpkgs";
       };
     in
     {
@@ -143,12 +145,22 @@
           kd240-bundle = self.nixosConfigurations.kd240-ab.config.system.build.bundle;
         };
 
-        checks.emco-rules = pkgs.runCommand "emco-rules-tests" { nativeBuildInputs = [ pkgs.python3 ]; } ''
-          cd ${rulesSrc}
-          # The rules write nothing outside a temp dir, but keep HOME honest.
-          HOME=$TMPDIR python3 -B linuxcnc/sim/emco-pcturn50/tests/test_emco_rules.py
-          touch $out
-        '';
+        checks = {
+          emco-rules = pkgs.runCommand "emco-rules-tests" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+            cd ${rulesSrc}
+            # The rules write nothing outside a temp dir, but keep HOME honest.
+            HOME=$TMPDIR python3 -B linuxcnc/sim/emco-pcturn50/tests/test_emco_rules.py
+            touch $out
+          '';
+        } // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          # The board's uplink and claim link (W4b), on an x86-64 host with
+          # nothing built for aarch64 (kd240/nix/tests/uplink-eval.nix).
+          kd240-uplink-eval = import ./kd240/nix/tests/uplink-eval.nix {
+            inherit pkgs;
+            kd240 = self.nixosConfigurations.kd240;
+            inherit (kd240Mesh) zenohdSource;
+          };
+        };
 
         apps.sim = dockerApp "emco-sim" ''
           echo "  open http://localhost:8080/vnc.html?autoconnect=1&resize=scale"

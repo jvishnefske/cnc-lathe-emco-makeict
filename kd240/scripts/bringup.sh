@@ -33,6 +33,8 @@ HELP="usage: bringup.sh [options]
   --tunnel-port PORT    step 3: local end of the SSH tunnel to the board's
                         loopback zenohd [17447]
   --cyclictest-s N      step 6 --apply: run length, seconds [300]
+  --cert FILE           step 8 --apply: the board's signed certificate
+  --ca FILE             step 8 --apply: the Zenoh CA (edge-ca ca --zenoh)
   --no-load             step 6: run cyclictest without the stress-ng load
   -h, --help            this text
 "
@@ -46,7 +48,7 @@ STEPS=(
     "Bench test: the UI drives the simulated lathe through the payloads"
     "cyclictest under load (pass: max <= 246 us, no overflow)"
     "RS-485 DE stays low; the GPIO inputs"
-    "Enroll the uplink certificate (needs W4b: emco-mesh-enroll)"
+    "Enroll the uplink certificate (emco-mesh-enroll; services.emco-mesh.uplink)"
 )
 
 host=kd240.local
@@ -60,6 +62,8 @@ pkcs11=""
 tunnel_port=17447
 ct_seconds=300
 ct_load=yes
+cert=""
+ca=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -74,6 +78,8 @@ while [ $# -gt 0 ]; do
         --tunnel-port) tunnel_port=$2; shift 2 ;;
         --cyclictest-s) ct_seconds=$2; shift 2 ;;
         --no-load) ct_load=""; shift ;;
+        --cert) cert=$2; shift 2 ;;
+        --ca) ca=$2; shift 2 ;;
         --list)
             for i in 1 2 3 4 5 6 7 8; do printf '%d. %s\n' "$i" "${STEPS[$i]}"; done
             exit 0 ;;
@@ -91,6 +97,12 @@ fi
 if [ -n "$key" ] && [ -n "$pkcs11" ]; then
     echo "--key and --pkcs11: give one" >&2; exit 2
 fi
+if [ -n "$cert$ca" ] && { [ -z "$cert" ] || [ -z "$ca" ]; }; then
+    echo "--cert and --ca go together" >&2; exit 2
+fi
+for f in "$cert" "$ca"; do
+    if [ -n "$f" ] && [ ! -r "$f" ]; then echo "$f: no such file" >&2; exit 2; fi
+done
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 target="$user@$host"
@@ -600,30 +612,80 @@ step7() {
 # ------------------------------------------------------------ step 8
 
 step8() {
-    local r=2
-    say "depends on W4b (services.emco-mesh.uplink, emco-mesh-enroll): not in this repository yet"
-    if have edge-ca; then ok "edge-ca here"; else gap "no edge-ca here (W3b, nixos-x86-squashfs; signs with the TPM)"; fi
-    would "ssh $target sudo emco-mesh-enroll                # key + CSR on the board; prints the CSR"
-    would "edge-ca issue <node-id> --ou kd240 --csr <file>   # on the CA host"
-    would "copy the certificate back to $target:/var/lib/emco-mesh/tls"
+    local r=0
+    say "services.emco-mesh.uplink: a second zenohd (emco-mesh-uplink) linking the board's router"
+    say "to the cloud mesh over mTLS, with a certificate from emco-mesh-enroll (BRINGUP.md step 8)"
+    if have edge-ca; then ok "edge-ca here"; else say "no edge-ca here: the certificate is signed on the CA host (W3b)"; fi
     board_up || return 1
-    if on_board command -v emco-mesh-enroll >/dev/null 2>&1; then
-        ok "emco-mesh-enroll on the board"
-        have edge-ca && r=0
+    read_ids || { bad "/run/emco-mesh/ids missing (step 1)"; return 1; }
+    local id=$UNIT csr="$PWD/kd240-$UNIT.csr"
+    if ! on_board command -v emco-mesh-enroll >/dev/null 2>&1; then
+        gap "no emco-mesh-enroll on the board: services.emco-mesh.uplink.enable is off (nix/configuration.nix)"
+        say "  set it, deploy (just deploy), then run this step again"
+        return 2
+    fi
+    ok "emco-mesh-enroll on the board"
+    local status
+    status=$(on_board sudo emco-mesh-enroll status 2>&1 || true)
+    printf '%s\n' "$status" | sed 's/^/        /'
+    local enrolled=""
+    if on_board sudo emco-mesh-enroll check >/dev/null 2>&1; then
+        ok "the certificate passes emco-mesh-enroll check (kd240-$id)"
+        enrolled=yes
     else
-        gap "no emco-mesh-enroll on the board (W4b)"
+        say "not enrolled yet, or the certificate fails its check:"
+        on_board sudo emco-mesh-enroll check 2>&1 | sed 's/^/        /' || true
     fi
-    local tls
-    tls=$(on_board 'sudo ls /var/lib/emco-mesh/tls 2>/dev/null' | paste -sd' ' - || true)
-    if [ -n "$tls" ]; then
-        say "/var/lib/emco-mesh/tls: $tls"
+    if on_board systemctl is-active --quiet emco-mesh-uplink; then
+        ok "emco-mesh-uplink active"
     else
-        say "nothing in /var/lib/emco-mesh/tls yet"
+        if [ -n "$enrolled" ]; then bad "emco-mesh-uplink not active (journalctl -u emco-mesh-uplink)"; r=1
+        else say "emco-mesh-uplink waits for a certificate (its ExecStartPre is the check)"; fi
     fi
-    if [ -n "$apply" ]; then
-        todo "W4b defines the file names and the CSR hand-off; run the three commands above by hand"
+    # zenohd's own connections (the fleet agent may use port 443 too).
+    local links
+    links=$(on_board "sudo ss -Htnp state established '( dport = :443 )'" 2>/dev/null | grep '"zenohd"' || true)
+    if [ -n "$links" ]; then
+        ok "the uplink's zenohd is connected: $(printf '%s' "$links" | awk '{print $4}' | paste -sd' ' -)"
+    elif [ -n "$enrolled" ]; then
+        bad "no established connection to port 443 (DNS for mesh.updates.<site>, the router, its ACL's CN list)"; r=1
     fi
-    return "$r"
+
+    say "the hand-off (the key never leaves the board; --apply runs the board's parts):"
+    say "  ssh $target sudo emco-mesh-enroll csr > $csr"
+    say "  edge-ca issue --ou kd240 $id --csr kd240-$id.csr --out kd240-$id.crt   # on the CA host"
+    say "  edge-ca ca --zenoh > zenoh-ca.pem                                       # on the CA host"
+    say "  scp kd240-$id.crt zenoh-ca.pem $target:/tmp/"
+    say "  ssh $target sudo emco-mesh-enroll install /tmp/kd240-$id.crt /tmp/zenoh-ca.pem"
+    say "and add \"kd240-$id\" to the kd240 subject's cert_common_names in the mesh router's ACL (MESH.md)"
+    if [ -n "$cert" ]; then would "scp $cert $ca $target:/tmp/ && ssh $target sudo emco-mesh-enroll install …"
+    elif [ -z "$enrolled" ]; then would "ssh $target sudo emco-mesh-enroll csr > $csr"; fi
+
+    if [ -z "$apply" ]; then
+        [ -n "$enrolled" ] || [ "$r" -ne 0 ] || r=2
+        return "$r"
+    fi
+    if [ -n "$cert" ]; then
+        local base
+        base=$(basename "$cert")
+        scp -q -o BatchMode=yes "$cert" "$ca" "$target:/tmp/" || { bad "scp failed"; return 1; }
+        if on_board sudo emco-mesh-enroll install "/tmp/$base" "/tmp/$(basename "$ca")"; then
+            ok "installed $base; emco-mesh-uplink restarted"
+            apply="" cert="" ca="" step8
+            return $?
+        fi
+        bad "emco-mesh-enroll install refused it (above)"
+        return 1
+    fi
+    if [ -n "$enrolled" ]; then return "$r"; fi
+    if on_board sudo emco-mesh-enroll csr >"$csr" 2>"$csr.log"; then
+        ok "CSR for kd240-$id in $csr (the key stays on the board)"
+    else
+        cat "$csr.log" >&2; bad "emco-mesh-enroll csr failed"; return 1
+    fi
+    rm -f "$csr.log"
+    gap "blocked: needs signing on the CA host, then: bringup.sh --step 8 --apply --cert kd240-$id.crt --ca zenoh-ca.pem"
+    return 2
 }
 
 # ------------------------------------------------------------ run

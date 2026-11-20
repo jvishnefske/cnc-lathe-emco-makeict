@@ -225,9 +225,11 @@ cmd_status() {
         printf 'check        FAILS (%s check)\n' "$prog"
     fi
     printf 'unit         %s: %s\n' "$unit" "$(systemctl is-active "$unit.service" 2>/dev/null || true)"
+    # The uplink's own connections only (the fleet agent may use 443 too);
+    # -p needs root, as status normally runs.
     local links
-    links=$(ss -Htn state established '( dport = :443 )' 2>/dev/null || true)
-    printf 'link         %s\n' "${links:-no established connection to port 443}"
+    links=$(ss -Htnp state established '( dport = :443 )' 2>/dev/null | grep '"zenohd"' | awk '{print $3 " -> " $4}' || true)
+    printf 'link         %s\n' "${links:-no zenohd connection established to port 443}"
 }
 
 # ------------------------------------------------------------------ main

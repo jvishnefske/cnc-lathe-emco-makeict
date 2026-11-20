@@ -15,8 +15,9 @@ kd240/scripts/bringup.sh --host 192.168.1.134  # no mDNS resolver here
 
 Options: `--host` (default `kd240.local`), `--user` (default `admin`),
 `--device /dev/sdX` (step 1 writes the card), `--key FILE` or
-`--pkcs11 LABEL` (the mwctl signer for steps 2 and 3), `--tunnel-port`
-(step 3, default 17447), `--cyclictest-s N` and `--no-load` (step 6).
+`--pkcs11 LABEL` (the mwctl key that claims the nodes in step 2 and signs
+in step 3), `--tunnel-port` (step 3, default 17447), `--cyclictest-s N`
+and `--no-load` (step 6), `--cert FILE --ca FILE` (step 8).
 
 Each step ends as **pass**, **FAIL**, or **blocked (gap)**. A gap is
 something the repository doesn't provide yet. The exit status is 1 if any
@@ -54,18 +55,63 @@ These are two separate trusts:
 
 **a. Each node's owner key.** Every `mw-posix-node` pins one public key
 (`sys/trust/claim`). After that it takes only signed commits and signed
-start/stop. The middleware README ("Linux payload host") says to claim
-over the node's local port, as `mwctl --port <local port> trust claim
---key …`. A claim never passes `gw/sys` or Zenoh (mwctl refuses
-`trust claim` over `--zenoh`).
+start/stop. A claim never passes `gw/sys` or Zenoh (mwctl refuses
+`trust claim` over `--zenoh`). It goes over the node's local serial port
+(`MW_POSIX_NODE_LOCAL_SERIAL`), with the owner's mwctl key: a key file
+(`--key`) or a PKCS#11 key such as the TPM's P-256 (`--pkcs11`).
 
-* **Gap:** neither node has a local port. `MW_POSIX_NODE_LOCAL_SERIAL` is
-  set by neither `mesh.nix` nor the posix-node module, so the board
-  offers no way to claim them. Both nodes run **unclaimed**. An unclaimed
-  node accepts any commit (trust on first use).
-* The script checks both units and `/var/lib/mw-robot/robot.env` for the
-  variable. Even when it is set, the claim stays a manual step on the
-  board. The script doesn't forward a serial port.
+**The claim link** (`services.emco-mesh.claimLink`, `nix/mesh.nix`) is that
+port on the KD240:
+
+* Each node's unit makes a PTY of its own, with `scripts/claim-link.py`
+  running beside the node in the same unit. It is at
+  `/run/emco-mesh-claim-unit/tty` or `/run/emco-mesh-claim-process/tty`
+  (`PrivateDevices` hides the host's devices from the node).
+* The daemon always drains the PTY, because the node writes every
+  publication to its local link as well.
+* It forwards to a root-only socket beside the PTY
+  (`/run/emco-mesh-claim-<node>/sock`, 0600 in a 0700 directory).
+
+`scripts/claim.sh` claims a node from the laptop. socat makes a PTY on the
+laptop, joined over `ssh admin@kd240.local sudo socat -
+UNIX-CONNECT:…/sock` to that socket, and mwctl runs on it:
+
+```sh
+kd240/scripts/claim.sh unit    --host kd240.local --pkcs11 mw-release
+kd240/scripts/claim.sh process --host kd240.local --pkcs11 mw-release
+kd240/scripts/claim.sh unit --info        # trust info only
+```
+
+It runs `trust info`, then `trust claim`, then `trust info` again. A node
+that is already claimed is left alone. It needs mwctl, socat and ssh on the
+laptop. On the board, socat comes with the claim link.
+
+* **Checks:**
+  * Each unit's `MW_POSIX_NODE_LOCAL_SERIAL` and the socket beside it.
+  * Each node's trust state, from `claim.sh --info`.
+* **What `--apply` does:** with `--key` or `--pkcs11`, it runs `claim.sh`
+  for each node that reports unclaimed.
+* **Gaps:** two middleware fixes, neither in the lathe's pin (514f974):
+  * **The node can't open a PTY.** posix-node's `open_serial` deasserts RTS
+    and DTR, which a PTY refuses with ENOTTY, and that error is fatal. A
+    node on the claim link would exit and restart for ever. Middleware
+    `bc80998` (branch `net/w4b0-zenohd-static-pty`, not pushed yet) ignores
+    ENOTTY there. So the board keeps the claim link **off**:
+    `claimLink.enable = kd240Mesh.ptyLocalSerial`, and `flake.nix` sets
+    that to `false`. Once the pin includes `bc80998`, set it to `true` and
+    deploy.
+  * **mwctl can't open a PTY either.** `tools/mwctl/src/port.rs` has the
+    same RTS/DTR calls and fails with `serial port: Not a typewriter` on
+    socat's PTY. This was checked with the W4a and `stack/posix-node`
+    builds. It needs the same fix as `bc80998`. `claim.sh` names this
+    error when it hits it.
+* Until then the step reports **blocked (gap)**, and both nodes run
+  **unclaimed**. An unclaimed node accepts any commit locally (trust on
+  first use). Over Zenoh it refuses `begin`, `commit`, `start` and `bind`
+  (W4a), so remote installs wait for the claim.
+* `kd240-claim-link` tests the daemon and `claim.sh` without a board, with
+  stand-ins for the node and mwctl (`nix/tests/claim_link.py`,
+  `nix/tests/claim-smoke.sh`).
 
 **b. The fleet's order key (M1, fleet on middleware trust).** The fleet
 agent obeys orders signed by a key in `trustedKeys`, using the same key
@@ -272,31 +318,105 @@ GPIO lines from `services.emco-mesh.kd240Inputs`
     watch a switch toggle. `libgpiod`'s `gpioinfo` is not in the image
     (`nix shell nixpkgs#libgpiod -c gpioinfo` on the board).
 
-## 8. Enroll the uplink certificate (depends on W4b)
+## 8. Enroll the uplink certificate
 
-**Nothing for this step exists in the repository yet.** W4b adds
-`services.emco-mesh.uplink` and `emco-mesh-enroll`. The planned flow:
+**The uplink** (`services.emco-mesh.uplink`, `nix/mesh.nix`) is a second
+zenohd, `emco-mesh-uplink`. It listens on nothing and links the board's
+loopback router to the cloud mesh router at
+`tls/mesh.updates.vishnefske.com:443`, over mTLS.
+
+* **The local zenohd is unchanged** whether the uplink is on or off: the
+  same unit and the same config, byte for byte. A missing or bad
+  certificate stops only the uplink.
+* **Its ACL is default deny.**
+  * In from the mesh: queries for the payloads' `info`, `trust/info`,
+    `manifest`, `manifest/cm`, `payload/{binding,start,stop,bind}` and
+    `loader/{begin,chunk,commit}`, and subscriptions to `app/proc/*/state`.
+  * Out to the mesh: the payloads' `@mw/node/*/sys/**` queryables, their
+    replies, and the process state.
+  * Never: `app/unit/**` in either direction, `trust/claim`, `board`,
+    `peers`, `fw/*`, `log`, `status`, or the board's other local
+    declarations.
+* **It is off by default.** To turn it on, in `nix/configuration.nix`:
+
+```nix
+  services.emco-mesh.uplink.enable = true;
+```
+
+Then `just deploy`. That adds the unit, its user, `/var/lib/emco-mesh/tls`
+(`ca`, `cert`, `key`; root:emco-mesh-uplink 0750) and `emco-mesh-enroll`.
+
+* **The clock.** The KD240 has no RTC. `systemd-time-wait-sync` holds
+  `time-sync.target` for up to 5 minutes, and the uplink starts after it.
+* **Its start check.** The uplink's `ExecStartPre` is `emco-mesh-enroll
+  check`. With no certificate, or a bad one, the uplink does not start, and
+  it retries every 2 minutes.
+* **Expiry.** A daily timer (`emco-mesh-uplink-expiry`) runs the same
+  check. It stops the uplink once the certificate fails it, because a TLS
+  session would otherwise outlive the certificate.
+
+**The certificate.** The board's identity is its **unit node id** (the
+`UNIT=` of `/run/emco-mesh/ids`, which `sys/info` and mDNS also show), with
+CN `kd240-<unit id>`. The key is made on the board and never leaves it:
 
 ```sh
-ssh admin@kd240.local sudo emco-mesh-enroll         # key + CSR on the board (the key never leaves it)
-edge-ca issue <node-id> --ou kd240 --csr <file>     # on the CA host (W3b, nixos-x86-squashfs; TPM)
-# copy the certificate back to /var/lib/emco-mesh/tls on the board
+ssh admin@kd240.local sudo emco-mesh-enroll csr > kd240-<id>.csr   # key (P-256, once) + CSR
+# on the CA host (W3b, edge-ca with the Zenoh CA):
+edge-ca issue --ou kd240 <id> --csr kd240-<id>.csr --out kd240-<id>.crt
+edge-ca ca --zenoh > zenoh-ca.pem
+scp kd240-<id>.crt zenoh-ca.pem admin@kd240.local:/tmp/
+ssh admin@kd240.local sudo emco-mesh-enroll install /tmp/kd240-<id>.crt /tmp/zenoh-ca.pem
 ```
+
+Then add `"kd240-<id>"` to the `kd240` subject's `cert_common_names` in the
+mesh router's `zenohd.json5` (homelab-flux, `MESH.md`).
+
+**What `emco-mesh-enroll install` checks.** It refuses any certificate
+that:
+
+* is not for this board's key;
+* doesn't chain to the CA for client use;
+* is expired;
+* is not valid yet (the message says to check the clock); or
+* has a CN other than `kd240-<unit id>`.
+
+A refused install changes nothing. A reflashed card gets a new machine id,
+and so a new unit id, so its old certificate is reported as another
+board's. `emco-mesh-enroll status` shows the certificate, the unit and the
+uplink zenohd's connection. `csr --rotate` makes a new key and keeps the
+old one as `key.old`.
 
 * **Checks:**
   * `emco-mesh-enroll` on the board.
-  * `edge-ca` on this machine.
-  * What `/var/lib/emco-mesh/tls` holds.
-* While W4b and W3b are missing, this step reports **blocked (gap)**, not
-  FAIL. `--apply` only prints the three commands, because W4b fixes the
-  file names.
+  * `emco-mesh-enroll status` and `check`.
+  * `emco-mesh-uplink` active.
+  * The uplink zenohd's established connection to port 443.
+  * Whether `edge-ca` is on this machine.
+* **What `--apply` does:**
+  * With `--cert FILE --ca FILE`, it copies both to the board, installs
+    them and checks again.
+  * Otherwise, if not yet enrolled, it fetches a CSR (`emco-mesh-enroll
+    csr`, which keeps an existing key) into `./kd240-<id>.csr`, and reports
+    **blocked** until the certificate is signed on the CA host.
+* **Gaps:**
+  * The mesh router (W3c) must be deployed, with DNS for
+    `mesh.updates.<site>`, and the CN must be enrolled in its ACL.
+  * The board's zenohd is nixpkgs' 1.10.0 until the middleware pin has
+    `f70ea67` (W4b-0). After that it is middleware's static 1.10.1 cross
+    build (`flake.nix`, `kd240Mesh.zenohd`; `zenohdSource` says which).
+* **Tested without a board:**
+  * `kd240-uplink-eval`: the generated configs, the unit and the ACL.
+  * `kd240-uplink-config`: a real zenohd runs the config.
+  * `kd240-enroll`: the script against a throwaway CA.
+  * `nix/tests/uplink-chain.sh`: a real chain of three zenohd.
 
 ## Gaps, in one list
 
 | Step | What the bring-up needs | Where it would come from |
 |---|---|---|
 | 1 | a freshly written image booted once (the board's card was converted in place) | a bench run |
-| 2 | a local port on each node, to claim it (`MW_POSIX_NODE_LOCAL_SERIAL`) | `nix/mesh.nix` |
+| 2 | a posix-node that opens a PTY as its local port (the claim link stays off until then) | middleware `bc80998` (W4b-0), then `ptyLocalSerial = true` in `flake.nix` |
+| 2 | an mwctl that opens a PTY (`--port` on claim.sh's socat PTY) | middleware, `tools/mwctl/src/port.rs` (as `bc80998`) |
 | 2 | the fleet agent on the default configuration, or the A/B card booted | `nix/ab.nix` on a board |
 | 3 | posix-node's `sys/*` keys over Zenoh | W4a (middleware) |
 | 3 | an `mwctl` package (`--features zenoh`) from the flake | middleware flake / lathe flake |
@@ -305,5 +425,6 @@ edge-ca issue <node-id> --ou kd240 --csr <file>     # on the CA host (W3b, nixos
 | 4 | `fleetInterlock` doing anything on `kd240` (needs the agent) | as step 2 |
 | 7 | GPIO device access for `mw-posix-node` (group, udev rule) | `nix/mesh.nix` |
 | 7 | a tool to watch `app/unit/<node>/cm` | — |
-| 8 | `emco-mesh-enroll`, `services.emco-mesh.uplink` | W4b |
+| 8 | the mesh router deployed, DNS for `mesh.updates.<site>`, the board's CN in its ACL | W3c (homelab-flux) |
+| 8 | middleware's static zenohd 1.10.1 on the board (nixpkgs' 1.10.0 until then) | middleware `f70ea67` (W4b-0) |
 | 8 | `edge-ca issue --ou kd240 --csr` | W3b |

@@ -294,8 +294,14 @@ and GPIO inputs, and the uplink certificate. `scripts/bringup.sh` runs
 them. Each step only checks unless you pass `--apply`. Things for the
 KD240 itself that the repository doesn't provide yet:
 
-* The nodes can't be claimed. Neither has a local port
-  (`MW_POSIX_NODE_LOCAL_SERIAL`).
+* The nodes can't be claimed yet. The claim link (a drained PTY per node,
+  `scripts/claim.sh`) is built and tested, but it stays off until
+  middleware's posix-node and mwctl accept a PTY as a serial port (W4b-0,
+  `bc80998`, not in the pin).
+* The uplink to the cloud mesh (`services.emco-mesh.uplink`, a second
+  zenohd over mTLS, with `emco-mesh-enroll` for its certificate) is off
+  until the mesh router is deployed and the board is enrolled (BRINGUP.md
+  step 8).
 * mwctl can't reach them over the loopback zenohd, because posix-node
   serves no `sys/*` keys over Zenoh (W4a).
 * The physical payload's binding names the simulator's points, so it

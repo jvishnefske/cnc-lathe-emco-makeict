@@ -37,8 +37,10 @@
         posixNodeModule = middleware.nixosModules.posix-node;
         posixNode = middleware.packages.aarch64-linux.mw-posix-node;
         zenohd = nixpkgs.legacyPackages.aarch64-linux.zenoh;
-        # Which of the two the board gets, for the eval check to report.
+        # Which of the two the board gets, for the eval check to report,
+        # and the same zenohd for this host, for the config check to run.
         zenohdSource = "nixpkgs";
+        zenohdHost = nixpkgs.legacyPackages.x86_64-linux.zenoh;
       };
     in
     {
@@ -159,6 +161,13 @@
             inherit pkgs;
             kd240 = self.nixosConfigurations.kd240;
             inherit (kd240Mesh) zenohdSource;
+          };
+          # zenohd (this host's build of the board's) runs the uplink's
+          # generated config (kd240/nix/tests/uplink-config.nix).
+          kd240-uplink-config = import ./kd240/nix/tests/uplink-config.nix {
+            inherit pkgs;
+            kd240 = self.nixosConfigurations.kd240;
+            zenohd = kd240Mesh.zenohdHost;
           };
           # emco-mesh-enroll (the board's key, CSR and certificate) against
           # a throwaway CA, as this host's build of the board's script.

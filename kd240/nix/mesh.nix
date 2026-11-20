@@ -76,6 +76,90 @@ let
     plugins_loading.enabled = false;
   };
   zenohdConfig = pkgs.writeText "zenohd.json5" (builtins.toJSON localConfig);
+
+  # The uplink (emco-mesh-uplink, uplink.enable): a router of its own with no
+  # listener (a router's default is tcp/[::]:7447), linked to the local
+  # router over loopback tcp and to the cloud mesh over mTLS. A failed
+  # connect never ends it: zenohd retries in the background, and again after
+  # a link drops, reading the TLS files at each attempt.
+  uplinkConfig = {
+    mode = "router";
+    listen.endpoints = [ ];
+    connect = {
+      endpoints = [ router up.endpoint ];
+      exit_on_failure = false;
+      timeout_ms = -1;
+      retry = { period_init_ms = 1000; period_max_ms = 60000; period_increase_factor = 2; };
+    };
+    scouting.multicast.enabled = false;
+    scouting.gossip.enabled = false;
+    plugins_loading.enabled = false;
+    # Name verification stays on: the router's SAN must be the endpoint's host.
+    transport.link.tls = {
+      root_ca_certificate = "${up.tlsDir}/ca";
+      connect_certificate = "${up.tlsDir}/cert";
+      connect_private_key = "${up.tlsDir}/key";
+      enable_mtls = true;
+    };
+    access_control = uplinkAcl;
+  };
+  # Default deny. A link matches subjects by its protocol: the loopback
+  # link to the local router (tcp) may carry anything, the mesh link (tls)
+  # only what is listed. `**` does not match a verbatim `@` chunk, so the
+  # local rule names @/** (admin space) and @mw/** (sys keys) as well.
+  # Ingress on the tls link is what the mesh sends the board; egress is what
+  # the board shows the mesh.
+  #   in   queries for the payloads' read-only and signed sys keys (no
+  #        trust/claim, board, peers, fw/*, log, status), and the mesh's
+  #        subscriptions to the process state (so the state's puts flow)
+  #   out  the payloads' sys queryables and their replies, and the process
+  #        state; nothing of the local clients' other declarations
+  #   never  app/unit/** either way: a unit's commands come from the board
+  uplinkAcl =
+    let
+      all = [ "put" "delete" "declare_subscriber" "query" "reply" "declare_queryable" "liveliness_token" "declare_liveliness_subscriber" "liveliness_query" ];
+      sys = k: "@mw/node/*/sys/${k}";
+    in
+    {
+      enabled = true;
+      default_permission = "deny";
+      subjects = [
+        { id = "local"; link_protocols = [ "tcp" ]; }
+        { id = "uplink"; link_protocols = [ "tls" ]; }
+      ];
+      rules = [
+        { id = "local-all"; permission = "allow"; flows = [ "ingress" "egress" ]; messages = all; key_exprs = [ "**" "@/**" "@mw/**" ]; }
+        { id = "no-unit"; permission = "deny"; flows = [ "ingress" "egress" ]; messages = [ "put" "delete" "declare_subscriber" "query" "reply" "declare_queryable" ]; key_exprs = [ "app/unit/**" ]; }
+        {
+          id = "cloud-queries-in";
+          permission = "allow";
+          flows = [ "ingress" ];
+          messages = [ "query" ];
+          key_exprs = map sys [
+            "info"
+            "trust/info"
+            "manifest"
+            "manifest/cm"
+            "payload/binding"
+            "payload/start"
+            "payload/stop"
+            "payload/bind"
+            "loader/begin"
+            "loader/chunk"
+            "loader/commit"
+          ];
+        }
+        { id = "cloud-subscribes-in"; permission = "allow"; flows = [ "ingress" ]; messages = [ "declare_subscriber" ]; key_exprs = [ "app/proc/*/state" ]; }
+        { id = "board-queryables-out"; permission = "allow"; flows = [ "egress" ]; messages = [ "declare_queryable" ]; key_exprs = [ (sys "**") ]; }
+        { id = "board-replies-out"; permission = "allow"; flows = [ "egress" ]; messages = [ "reply" ]; key_exprs = [ "@mw/node/**" ]; }
+        { id = "board-state-out"; permission = "allow"; flows = [ "egress" ]; messages = [ "put" ]; key_exprs = [ "app/proc/*/state" ]; }
+      ];
+      policies = [
+        { id = "local"; rules = [ "local-all" ]; subjects = [ "local" ]; }
+        { id = "uplink-deny"; rules = [ "no-unit" ]; subjects = [ "uplink" ]; }
+        { id = "uplink-allow"; rules = [ "cloud-queries-in" "cloud-subscribes-in" "board-queryables-out" "board-replies-out" "board-state-out" ]; subjects = [ "uplink" ]; }
+      ];
+    };
   announce = pkgs.writeShellScript "emco-mesh-announce" ''
     set -eu
     . ${run}/ids
@@ -196,6 +280,8 @@ in
     {
       services.emco-mesh.generated = {
         inherit localConfig;
+      } // lib.optionalAttrs up.enable {
+        inherit uplinkConfig;
       };
 
       assertions = [

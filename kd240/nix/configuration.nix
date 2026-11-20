@@ -248,6 +248,9 @@ in
     posixNodePackage = kd240Mesh.posixNode;
     zenohdPackage = kd240Mesh.zenohd;
     driver = "kd240";
+    # Each node's local link for its claim (BRINGUP.md step 2), once the
+    # middleware pin's posix-node accepts a PTY (flake.nix).
+    claimLink.enable = kd240Mesh.ptyLocalSerial;
   };
 
   # Doc 65 S2: the PL loader, in check mode until there is a bitstream (an

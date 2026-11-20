@@ -22,6 +22,15 @@
 #                          directory and id
 #   emco-mesh-announce     mDNS: `_emco-lathe._tcp` on the UI's port, its TXT
 #                          naming both node ids (for M7's autoprobe)
+#   claim link             (claimLink.enable, W4b) each node's local serial
+#                          link (MW_POSIX_NODE_LOCAL_SERIAL, where a node is
+#                          claimed) is a PTY made inside its own unit by
+#                          scripts/claim-link.py, at
+#                          /run/emco-mesh-claim-{unit,process}/tty, and
+#                          always drained; root reaches it on the socket
+#                          beside it (scripts/claim.sh: mwctl on the laptop,
+#                          ssh, socat). Needs a posix-node that opens a PTY
+#                          (middleware bc80998): flake.nix kd240Mesh.
 #   emco-mesh-uplink       (uplink.enable, W4b) a SECOND zenohd, with no
 #                          listener, linking the local router to the cloud
 #                          mesh over mTLS (tls/mesh.updates.<site>:443), its
@@ -177,6 +186,37 @@ let
   '';
   posixService = config.systemd.services.mw-posix-node;
   up = cfg.uplink;
+  claim = cfg.claimLink.enable;
+  claimDir = which: "emco-mesh-claim-${which}";
+  # The node's command as middleware's module has it.
+  nodeExec = lib.escapeShellArgs ([ (lib.getExe cfg.posixNodePackage) ] ++ config.services.mw-posix-node.args);
+  # ExecStart of both node units with the claim link: the daemon in the
+  # background (same unit, same cgroup: it stops with the node), then the
+  # node, exec'd. A daemon that fails to come up never keeps the node down:
+  # the node then starts without a local link, and says so in the journal.
+  claimWrapper = pkgs.writeShellScript "emco-mesh-claim-link" ''
+    dir=''${RUNTIME_DIRECTORY%%:*}
+    ${pkgs.python3}/bin/python3 -I ${../scripts/claim-link.py} &
+    i=0
+    while [ "$i" -lt 50 ] && ! { [ -e "$dir/tty" ] && [ -S "$dir/sock" ]; }; do
+      ${pkgs.coreutils}/bin/sleep 0.1
+      i=$((i + 1))
+    done
+    if [ -e "$dir/tty" ] && [ -S "$dir/sock" ]; then
+      echo "emco-mesh-claim-link: local link $dir/tty, claim with kd240/scripts/claim.sh" >&2
+    else
+      echo "emco-mesh-claim-link: NO CLAIM LINK (the daemon did not come up in 5 s): starting the node without MW_POSIX_NODE_LOCAL_SERIAL" >&2
+      unset MW_POSIX_NODE_LOCAL_SERIAL
+    fi
+    exec "$@"
+  '';
+  claimUnit = which: lib.optionalAttrs claim {
+    RuntimeDirectory = claimDir which;
+    RuntimeDirectoryMode = "0700";
+  };
+  claimEnv = which: lib.optionalAttrs claim {
+    MW_POSIX_NODE_LOCAL_SERIAL = "/run/${claimDir which}/tty";
+  };
   needsIds = {
     after = [ "emco-mesh-ids.service" "zenohd.service" ];
     requires = [ "emco-mesh-ids.service" ];
@@ -267,6 +307,18 @@ in
       };
     };
 
+    claimLink.enable = mkOption {
+      type = types.bool;
+      default = true;
+      description = ''
+        A local serial link for each node, so it can be claimed: a PTY in
+        the node's unit, always drained, with a root-only socket beside it
+        (/run/emco-mesh-claim-{unit,process}/sock) for kd240/scripts/claim.sh.
+        Needs a mw-posix-node that accepts a PTY as its local serial port
+        (middleware bc80998): an older one fails to open it and exits.
+      '';
+    };
+
     generated = mkOption {
       internal = true;
       readOnly = true;
@@ -341,7 +393,7 @@ in
         enable = true;
         package = cfg.posixNodePackage;
         zenohRouter = router;
-        environment = {
+        environment = claimEnv "unit" // {
           MW_POSIX_NODE_DRIVER = cfg.driver;
           # Phase commands and segments for this unit (the payload
           # subscribes to its own node's keys only).
@@ -351,10 +403,14 @@ in
         };
       };
       systemd.services.mw-posix-node = needsIds // {
-        serviceConfig.EnvironmentFile = lib.mkForce [
-          "${run}/unit.env"
-          "-/var/lib/mw-robot/robot.env"
-        ];
+        serviceConfig = {
+          EnvironmentFile = lib.mkForce [
+            "${run}/unit.env"
+            "-/var/lib/mw-robot/robot.env"
+          ];
+        } // lib.optionalAttrs claim ({
+          ExecStart = lib.mkForce "${claimWrapper} ${nodeExec}";
+        } // claimUnit "unit");
       };
 
       # A node hosts one payload, so the process model gets a node of its
@@ -362,7 +418,7 @@ in
       systemd.services.mw-posix-node-process = needsIds // {
         description = "Linux payload host: the lathe's process model";
         wantedBy = [ "multi-user.target" ];
-        environment = builtins.removeAttrs posixService.environment [ "PATH" ] // {
+        environment = builtins.removeAttrs posixService.environment [ "PATH" "MW_POSIX_NODE_LOCAL_SERIAL" ] // claimEnv "process" // {
           MW_PORT = toString (config.services.mw-posix-node.port + 1);
           MW_POSIX_NODE_STATE = "/var/lib/mw-posix-node-process";
           MW_POSIX_NODE_DRIVER = "none";
@@ -370,7 +426,9 @@ in
           MW_GATEWAY_DOWNLINK = "app/proc/**,app/unit/**";
         };
         unitConfig.StartLimitIntervalSec = 0;
-        serviceConfig = builtins.removeAttrs posixService.serviceConfig [ "ExecStartPre" ] // {
+        # ExecStart (the claim link's wrapper, or the node) is the unit
+        # node's; the wrapper finds its own RuntimeDirectory.
+        serviceConfig = builtins.removeAttrs posixService.serviceConfig [ "ExecStartPre" ] // claimUnit "process" // {
           StateDirectory = "mw-posix-node-process";
           EnvironmentFile = [ "${run}/process.env" "-/var/lib/mw-robot/robot.env" ];
         };

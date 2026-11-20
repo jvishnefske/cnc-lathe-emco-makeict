@@ -60,6 +60,26 @@ def read_exactly(fd_or_sock, n, timeout=WAIT):
     return got
 
 
+def writes_within(fd, data, timeout):
+    """True if a blocking write of all of data to fd returns within timeout.
+
+    The write runs on a thread, so a PTY that is not drained makes this
+    False instead of hanging the test."""
+    done = threading.Event()
+
+    def write():
+        view = memoryview(data)
+        try:
+            while view:
+                view = view[os.write(fd, view):]
+        except OSError:
+            return
+        done.set()
+
+    threading.Thread(target=write, daemon=True).start()
+    return done.wait(timeout)
+
+
 def nothing_within(fd_or_sock, timeout=0.3):
     r, _, _ = select.select([fd_or_sock], [], [], timeout)
     if not r:
@@ -135,19 +155,10 @@ class ClaimLink(unittest.TestCase):
     # ---- draining
 
     def test_with_no_client_a_megabyte_from_the_node_never_blocks(self):
-        node = self.open_node()
+        node = os.dup(self.open_node())
         os.set_blocking(node, True)
-        data = os.urandom(1 << 20)
-        done = threading.Event()
-
-        def write():
-            view = memoryview(data)
-            while view:
-                view = view[os.write(node, view):]
-            done.set()
-
-        threading.Thread(target=write, daemon=True).start()
-        self.assertTrue(done.wait(10), "the node's writes blocked: the PTY is not drained")
+        self.assertTrue(writes_within(node, os.urandom(1 << 20), 10),
+                        "the node's writes blocked: the PTY is not drained")
 
     def test_output_before_a_client_is_not_replayed_to_it(self):
         node = self.open_node()
@@ -200,8 +211,10 @@ class ClaimLink(unittest.TestCase):
         c.close()
         self.clients.remove(c)
         time.sleep(0.2)
-        os.set_blocking(node, True)
-        os.write(node, os.urandom(256 << 10))  # drained again: returns
+        blocking = os.dup(node)
+        os.set_blocking(blocking, True)
+        self.assertTrue(writes_within(blocking, os.urandom(256 << 10), 10),
+                        "not drained after the client left")
         c = self.connect()
         time.sleep(0.2)
         os.write(node, b"again")

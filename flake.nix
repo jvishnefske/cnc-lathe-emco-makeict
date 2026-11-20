@@ -55,6 +55,12 @@
           zenohdHost =
             if fromMiddleware then middleware.packages.x86_64-linux.zenohd
             else nixpkgs.legacyPackages.x86_64-linux.zenoh;
+          # The claim link (services.emco-mesh.claimLink) gives each node a
+          # PTY as its local serial port. posix-node opens one only from
+          # middleware bc80998 (W4b-0, not pushed); the pinned 514f974 fails
+          # on it (ENOTTY deasserting RTS) and the node would exit and
+          # restart for ever. Set true with the pin bump (BRINGUP.md step 2).
+          ptyLocalSerial = false;
         };
     in
     {

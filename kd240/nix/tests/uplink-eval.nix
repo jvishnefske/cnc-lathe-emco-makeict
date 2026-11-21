@@ -57,6 +57,10 @@ let
       enroll = lib.any (p: (p.name or "") == "emco-mesh-enroll") c.environment.systemPackages;
       node = unit "mw-posix-node";
       nodeProcess = unit "mw-posix-node-process";
+      claimUnit = unit "emco-mesh-claim-link-unit";
+      claimProcess = unit "emco-mesh-claim-link-process";
+      nodeUser = s.mw-posix-node.serviceConfig.User;
+      nodeProcessUser = s.mw-posix-node-process.serviceConfig.User;
     };
 
   all = {
@@ -196,19 +200,36 @@ pkgs.runCommand "kd240-uplink-eval"
   check "on: the TLS dir, root:emco-mesh-uplink 0750" \
     '.on.tmpfiles == ["d /var/lib/emco-mesh 0755 root root -", "d /var/lib/emco-mesh/tls 0750 root emco-mesh-uplink -"]'
 
-  # ---- the claim link: a PTY and its daemon inside each node's unit
+  # ---- the claim link: per node a root daemon with the PTY and the socket,
+  # the PTY's slave handed to the node's uid
   echo "claim link on the board: $(jq -r .boardClaimLink "$facts")"
   check "claim: no failed assertions" '.claimOn.failedAssertions == []'
   for n in node:unit nodeProcess:process; do
     u=''${n%%:*} w=''${n#*:}
     check "claim on: $u's MW_POSIX_NODE_LOCAL_SERIAL is /run/emco-mesh-claim-$w/tty" \
       '.claimOn[$u].environment.MW_POSIX_NODE_LOCAL_SERIAL == "/run/emco-mesh-claim-\($w)/tty"' --arg u "$u" --arg w "$w"
-    check "claim on: $u's RuntimeDirectory is emco-mesh-claim-$w, 0700" \
-      '.claimOn[$u].serviceConfig | .RuntimeDirectory == "emco-mesh-claim-\($w)" and .RuntimeDirectoryMode == "0700"' \
-      --arg u "$u" --arg w "$w"
-    check "claim on: $u starts through the claim link wrapper, then the node as before" \
+    check "claim on: $u owns no runtime directory (the claim dir is root's)" \
+      '.claimOn[$u].serviceConfig | has("RuntimeDirectory") | not' --arg u "$u"
+    check "claim on: $u starts through the claim wrapper, then the node as before" \
       '.claimOn[$u].serviceConfig.ExecStart as $e | .claimOff[$u].serviceConfig.ExecStart as $plain
-       | ($e | test("^/nix/store/[a-z0-9]{32}-emco-mesh-claim-link ")) and ($e | endswith(" " + $plain))' --arg u "$u"
+       | ($e | test("^/nix/store/[a-z0-9]{32}-emco-mesh-claim-node ")) and ($e | endswith(" " + $plain))' --arg u "$u"
+    c=claimUnit
+    if [ "$u" = nodeProcess ]; then c=claimProcess; fi
+    check "claim on: $u wants, follows and is part of emco-mesh-claim-link-$w" \
+      '.claimOn[$u] as $n | "emco-mesh-claim-link-\($w).service" as $c
+       | ($n.wants | index($c)) and ($n.after | index($c)) and ($n.partOf | index($c))' --arg u "$u" --arg w "$w"
+    check "claim on: emco-mesh-claim-link-$w runs as root (no User=)" \
+      '.claimOn[$c].serviceConfig | has("User") | not' --arg c "$c"
+    check "claim on: emco-mesh-claim-link-$w has /run/emco-mesh-claim-$w, root 0755" \
+      '.claimOn[$c].serviceConfig | .RuntimeDirectory == "emco-mesh-claim-\($w)" and .RuntimeDirectoryMode == "0755"' \
+      --arg c "$c" --arg w "$w"
+    check "claim on: emco-mesh-claim-link-$w hands the slave to $u's user, admits root only" \
+      '.claimOn[$c].serviceConfig.ExecStart
+       | test("claim-link.py --dir /run/emco-mesh-claim-\($w) --owner \($user) --allow-uid 0$")' \
+      --arg c "$c" --arg w "$w" --arg user "$(jq -r ".claimOn.''${u}User" "$facts")"
+    check "claim on: emco-mesh-claim-link-$w: PrivateDevices, CAP_CHOWN only, AF_UNIX only, Restart=always" \
+      '.claimOn[$c].serviceConfig | .PrivateDevices == true and .CapabilityBoundingSet == "CAP_CHOWN"
+       and .RestrictAddressFamilies == ["AF_UNIX"] and .NoNewPrivileges == true and .Restart == "always"' --arg c "$c"
     check "claim on: $u keeps PrivateDevices" '.claimOn[$u].serviceConfig.PrivateDevices == true' --arg u "$u"
     check "claim off: $u has no MW_POSIX_NODE_LOCAL_SERIAL" \
       '.claimOff[$u].environment | has("MW_POSIX_NODE_LOCAL_SERIAL") | not' --arg u "$u"
@@ -220,7 +241,11 @@ pkgs.runCommand "kd240-uplink-eval"
        | .[0] == .[1]' --arg u "$u"
   done
   check "claim on: the two nodes have links of their own" \
-    '.claimOn.node.serviceConfig.RuntimeDirectory != .claimOn.nodeProcess.serviceConfig.RuntimeDirectory'
+    '.claimOn.claimUnit.serviceConfig.RuntimeDirectory != .claimOn.claimProcess.serviceConfig.RuntimeDirectory'
+  check "claim off: no claim link units" '.claimOff.claimUnit == {} and .claimOff.claimProcess == {}'
+  # Known and pre-existing: both nodes run as one uid (BRINGUP.md, gaps).
+  check "both nodes share the mw-posix-node uid (a known gap, recorded)" \
+    '.claimOn.nodeUser == "mw-posix-node" and .claimOn.nodeProcessUser == "mw-posix-node"'
   check "claim on: the process node keeps its own state" \
     '.claimOn.nodeProcess.serviceConfig.StateDirectory == "mw-posix-node-process"'
   check "claim: the local zenohd is untouched" '.claimOn.zenohd == .off.zenohd and .claimOff.zenohd == .off.zenohd'

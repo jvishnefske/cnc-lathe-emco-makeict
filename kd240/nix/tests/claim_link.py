@@ -1,10 +1,12 @@
 """Tests for kd240/scripts/claim-link.py, the claim link's drain-always PTY daemon (W4b).
 
 Each mw-posix-node on the KD240 gets MW_POSIX_NODE_LOCAL_SERIAL pointing at
-a PTY that this daemon owns, inside the node's own unit. The daemon forwards
-between the PTY and a root-only unix socket that `claim.sh` reaches over
-ssh, and while nobody is attached it reads and discards everything, so the
-node's writes (every publication goes to the local link too) never block.
+a PTY that this daemon makes, as root, in a unit of its own; the PTY's slave
+is handed to the node's uid (--owner). The daemon forwards between the PTY
+and a unix socket that only its own uid (root) may use, checked by the
+peer's credentials and not only by the socket's mode, and while nobody is
+attached it reads and discards everything, so the node's writes (every
+publication goes to the local link too) never block.
 
 The "node" here opens the PTY's slave the way a program opens a serial
 port. Run from anywhere:
@@ -14,6 +16,7 @@ port. Run from anywhere:
 """
 
 import os
+import pwd
 import select
 import signal
 import socket
@@ -28,6 +31,13 @@ import unittest
 
 DAEMON = None  # set from argv in main()
 WAIT = 5.0
+
+
+def start_daemon(directory, *extra):
+    """The daemon on directory, the slave handed to this test's own user."""
+    me = pwd.getpwuid(os.getuid()).pw_name
+    return subprocess.Popen([sys.executable, "-I", DAEMON, "--dir", directory, "--owner", me, *extra],
+                            stderr=subprocess.PIPE, text=True)
 
 
 def wait_for(cond, timeout=WAIT, what="condition"):
@@ -93,10 +103,8 @@ class ClaimLink(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = os.path.join(self.tmp.name, "emco-mesh-claim-unit")
-        os.mkdir(self.dir, 0o755)  # the daemon tightens it
-        env = dict(os.environ, RUNTIME_DIRECTORY=self.dir)
-        self.proc = subprocess.Popen([sys.executable, "-I", DAEMON], env=env,
-                                     stderr=subprocess.PIPE, text=True)
+        os.mkdir(self.dir, 0o777)  # the daemon sets it
+        self.proc = start_daemon(self.dir)
         self.tty = os.path.join(self.dir, "tty")
         self.sock = os.path.join(self.dir, "sock")
         wait_for(lambda: os.path.islink(self.tty) and os.path.exists(self.sock), what="tty and sock")
@@ -137,10 +145,21 @@ class ClaimLink(unittest.TestCase):
         self.assertTrue(stat.S_ISCHR(os.stat(self.tty).st_mode))
         self.assertTrue(os.isatty(self.open_node()))
 
-    def test_socket_0600_and_dir_0700(self):
-        self.assertTrue(stat.S_ISSOCK(os.lstat(self.sock).st_mode))
-        self.assertEqual(stat.S_IMODE(os.lstat(self.sock).st_mode), 0o600)
-        self.assertEqual(stat.S_IMODE(os.stat(self.dir).st_mode), 0o700)
+    def test_socket_0600_and_dir_0755_both_the_daemons(self):
+        # The node only follows tty through the dir; nothing in it is the node's.
+        st = os.lstat(self.sock)
+        self.assertTrue(stat.S_ISSOCK(st.st_mode))
+        self.assertEqual(stat.S_IMODE(st.st_mode), 0o600)
+        self.assertEqual(st.st_uid, os.geteuid())
+        d = os.stat(self.dir)
+        self.assertEqual(stat.S_IMODE(d.st_mode), 0o755)
+        self.assertEqual(d.st_uid, os.geteuid())
+        self.assertEqual(os.lstat(self.tty).st_uid, os.geteuid())
+
+    def test_the_slave_is_the_owners_and_0600(self):
+        st = os.stat(self.tty)
+        self.assertEqual(st.st_uid, os.getuid())
+        self.assertEqual(stat.S_IMODE(st.st_mode), 0o600)
 
     def test_no_temporary_names_left(self):
         self.assertEqual(sorted(os.listdir(self.dir)), ["sock", "tty"])
@@ -229,6 +248,42 @@ class ClaimLink(unittest.TestCase):
         time.sleep(0.2)
         os.write(node, b"reopened")
         self.assertEqual(read_exactly(c, 8), b"reopened")
+
+    # ---- who may connect: the peer's uid, not only the socket's mode
+
+    def test_a_peer_of_another_uid_is_refused(self):
+        # The same daemon told that only some other uid may connect: this
+        # test's connection (its uid) is closed at once and never joined.
+        other = os.path.join(self.tmp.name, "other")
+        os.mkdir(other)
+        proc = start_daemon(other, "--allow-uid", "4242")
+        try:
+            sock = os.path.join(other, "sock")
+            wait_for(lambda: os.path.exists(sock) and os.path.islink(os.path.join(other, "tty")), what="sock")
+            node = os.open(os.path.join(other, "tty"), os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+            c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            c.connect(sock)
+            c.settimeout(WAIT)
+            self.assertEqual(c.recv(16), b"", "a refused peer was not closed")
+            os.write(node, b"secret")
+            time.sleep(0.2)
+            with self.assertRaises(OSError):
+                c.sendall(b"x" * 65536)  # closed: EPIPE or ECONNRESET
+            c.close()
+            os.close(node)
+        finally:
+            proc.terminate()
+            proc.wait(WAIT)
+            err = proc.stderr.read()
+            proc.stderr.close()
+        self.assertIn(f"refused a peer with uid {os.getuid()}", err)
+
+    def test_the_daemons_own_uid_may_connect_by_default(self):
+        node = self.open_node()
+        c = self.connect()
+        time.sleep(0.2)
+        os.write(node, b"ok")
+        self.assertEqual(read_exactly(c, 2), b"ok")
 
     # ---- stopping
 

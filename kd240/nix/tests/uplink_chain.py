@@ -132,6 +132,12 @@ def case_main(a):
     for k in DENIED:
         check(f"M4 tool {k} (not exported)", ask(tool, f"@mw/node/{N1}/{k}"), [])
     check("M5 tool @mw/node/** (wide)", ask(tool, "@mw/node/**"), [])
+    # Every node's every sys key at once: wider than any one exported key,
+    # so B lets none of it in (the board would answer it with sys/info).
+    check("M5 tool @mw/node/*/sys/** (wide)", ask(tool, "@mw/node/*/sys/**"), [])
+    check("M5 tool @mw/node/b1/sys/** (wide)", ask(tool, f"@mw/node/{N1}/sys/**"), [])
+    check("M5 local client @mw/node/*/sys/** (unrestricted: the board answers)",
+          ask(local1, "@mw/node/*/sys/**"), [f"{N1}:sys/info"])
     check("M11 tool @mw/local/secret (a local queryable)", ask(tool, "@mw/local/secret"), [])
     check("M11 tool app/unit/x/q (a local queryable)", ask(tool, "app/unit/x/q"), [])
     check("M11 tool app/proc/x/q (a local queryable)", ask(tool, "app/proc/x/q"), [])

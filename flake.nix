@@ -211,6 +211,19 @@
             pkgs = nixpkgs-linuxcnc.legacyPackages.${system};
             inherit (kd240Mesh) posixNodeModule;
           };
+          # bringup.sh's argument and board-input handling, against a
+          # stand-in ssh and scp (kd240/nix/tests/bringup-smoke.sh).
+          kd240-bringup = pkgs.runCommand "kd240-bringup"
+            { nativeBuildInputs = [ pkgs.openssl pkgs.shellcheck pkgs.iproute2 ]; } ''
+            cp ${./kd240/scripts/bringup.sh} bringup.sh
+            cp ${./kd240/nix/tests/bringup-smoke.sh} bringup-smoke.sh
+            cp ${./kd240/scripts/emco-mesh-enroll} emco-mesh-enroll
+            chmod +x bringup.sh bringup-smoke.sh emco-mesh-enroll
+            patchShebangs bringup.sh bringup-smoke.sh emco-mesh-enroll
+            shellcheck bringup.sh bringup-smoke.sh
+            ./bringup-smoke.sh ./bringup.sh ./emco-mesh-enroll
+            touch $out
+          '';
           # emco-mesh-enroll (the board's key, CSR and certificate) against
           # a throwaway CA, as this host's build of the board's script.
           kd240-enroll = pkgs.runCommand "kd240-enroll"

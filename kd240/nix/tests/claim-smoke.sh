@@ -63,6 +63,16 @@ out=$("$claim" unit --socket "$work/nope.sock" --info 2>&1) && rc=0 || rc=$?
 [ "$rc" -ne 0 ] && grep -qi "no link\|trust info failed" <<<"$out" && ok "no claim link: a clear failure" \
     || fail "no claim link (rc $rc): $out"
 
+# --host and --user reach ssh: names only, no options.
+for bad in "-oProxyCommand=x" "a b" "h;id" "" "user@h"; do
+    out=$("$claim" unit --host "$bad" --info 2>&1) && rc=0 || rc=$?
+    [ "$rc" -eq 2 ] && grep -q "host" <<<"$out" && ok "--host '$bad' refused" || fail "--host '$bad' (rc $rc): $out"
+    out=$("$claim" unit --user "$bad" --info 2>&1) && rc=0 || rc=$?
+    [ "$rc" -eq 2 ] && grep -q "user" <<<"$out" && ok "--user '$bad' refused" || fail "--user '$bad' (rc $rc): $out"
+done
+out=$("$claim" unit --host kd240.local --user admin_1 --socket "$dir/sock" --info 2>&1) && rc=0 || rc=$?
+[ "$rc" -eq 0 ] && ok "a plain --host and --user pass" || fail "plain --host/--user (rc $rc): $out"
+
 # mwctl as it is today, on a PTY.
 printf '#!/bin/sh\necho "mwctl: serial port: Not a typewriter" >&2; exit 1\n' >"$work/mwctl-enotty"
 chmod +x "$work/mwctl-enotty"

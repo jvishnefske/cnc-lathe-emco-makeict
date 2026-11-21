@@ -430,6 +430,34 @@ old one as `key.old`.
   * `kd240-enroll`: the script against a throwaway CA.
   * `nix/tests/uplink-chain.sh`: a real chain of three zenohd.
 
+## After the middleware pin bump
+
+The lathe pins middleware at 514f974. These changes on middleware's side
+are needed here, and each needs a step in this repository once the pin
+includes it:
+
+* **posix-node opens a PTY** (`bc80998`, W4b-0). Set
+  `kd240Mesh.ptyLocalSerial = true` in `flake.nix` and deploy. That turns
+  the claim link on (step 2).
+* **mwctl opens a PTY.** `tools/mwctl/src/port.rs` needs the same ENOTTY
+  fix as `bc80998`. This is not written yet. `claim.sh` needs it (step 2).
+* **Static zenohd 1.10.1** (`f70ea67`, W4b-0). Nothing to do here:
+  `kd240Mesh.zenohd` picks up `zenohd-aarch64` by itself, and the eval
+  check then reports `1.10.1 from middleware`.
+* **posix-node's sys keys over Zenoh** (W4a), for step 3.
+* **posix-node announces itself over mDNS** (W1b, `MW_POSIX_NODE_MDNS=on`).
+  Don't enable it before the pin has it. Then:
+  * Set `MW_POSIX_NODE_MDNS = "on"` in `services.mw-posix-node.environment`
+    in `nix/mesh.nix`. The process node copies the unit node's environment,
+    so both announce.
+  * UDP 5353 is already open: `services.avahi.openFirewall` is true on the
+    board (`allowedUDPPorts = [ 5353 ]`).
+  * **Board check (D33):**
+    * `avahi-browse` lists both `posix-<id>` instances (unit and process).
+    * `kd240.local` stays avahi's.
+    * The journal has no rename lines (no name conflict between the nodes
+      and avahi).
+
 ## Gaps, in one list
 
 | Step | What the bring-up needs | Where it would come from |
@@ -448,4 +476,5 @@ old one as `key.old`.
 | 7 | a tool to watch `app/unit/<node>/cm` | — |
 | 8 | the mesh router deployed, DNS for `mesh.updates.<site>`, the board's CN in its ACL | W3c (homelab-flux) |
 | 8 | middleware's static zenohd 1.10.1 on the board (nixpkgs' 1.10.0 until then) | middleware `f70ea67` (W4b-0) |
+| — | posix-node's own mDNS announcement (`MW_POSIX_NODE_MDNS`) | middleware W1b, then "After the middleware pin bump" |
 | 8 | `edge-ca issue --ou kd240 --csr` | W3b |

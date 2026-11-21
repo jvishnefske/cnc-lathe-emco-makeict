@@ -62,6 +62,11 @@ let
       claimProcess = unit "emco-mesh-claim-link-process";
       nodeUser = s.mw-posix-node.serviceConfig.User;
       nodeProcessUser = s.mw-posix-node-process.serviceConfig.User;
+      nodeGroup = s.mw-posix-node.serviceConfig.Group;
+      nodeProcessGroup = s.mw-posix-node-process.serviceConfig.Group;
+      nodeUsers = lib.filter (lib.hasPrefix "mw-posix-node") (builtins.attrNames c.users.users);
+      nodeGroups = lib.filter (lib.hasPrefix "mw-posix-node") (builtins.attrNames c.users.groups);
+      legacyTiocsti = c.boot.kernel.sysctl."dev.tty.legacy_tiocsti" or null;
     };
 
   all = {
@@ -249,9 +254,21 @@ pkgs.runCommand "kd240-uplink-eval"
   check "claim on: the two nodes have links of their own" \
     '.claimOn.claimUnit.serviceConfig.RuntimeDirectory != .claimOn.claimProcess.serviceConfig.RuntimeDirectory'
   check "claim off: no claim link units" '.claimOff.claimUnit == {} and .claimOff.claimProcess == {}'
-  # Known and pre-existing: both nodes run as one uid (BRINGUP.md, gaps).
-  check "both nodes share the mw-posix-node uid (a known gap, recorded)" \
-    '.claimOn.nodeUser == "mw-posix-node" and .claimOn.nodeProcessUser == "mw-posix-node"'
+  # One uid per node: the other node can neither open a node's claim PTY
+  # (nor TIOCSTI into it), nor read its state.
+  for v in off claimOn claimOff; do
+    check "$v: the unit node runs as mw-posix-node, the process node as mw-posix-node-process" \
+      '.[$v] | .nodeUser == "mw-posix-node" and .nodeGroup == "mw-posix-node"
+       and .nodeProcessUser == "mw-posix-node-process" and .nodeProcessGroup == "mw-posix-node-process"' --arg v "$v"
+    check "$v: both users and groups exist" \
+      '.[$v] | .nodeUsers == ["mw-posix-node", "mw-posix-node-process"] and .nodeGroups == ["mw-posix-node", "mw-posix-node-process"]' \
+      --arg v "$v"
+  done
+  check "claim on: each claim unit hands the slave to its own node's user" \
+    '(.claimOn.claimUnit.serviceConfig.ExecStart | test("--owner mw-posix-node --"))
+     and (.claimOn.claimProcess.serviceConfig.ExecStart | test("--owner mw-posix-node-process --"))'
+  check "the board: dev.tty.legacy_tiocsti = 0 (no TIOCSTI without CAP_SYS_ADMIN)" '.off.legacyTiocsti == 0'
+  check "claim on: and with the claim link" '.claimOn.legacyTiocsti == 0'
   check "claim on: the process node keeps its own state" \
     '.claimOn.nodeProcess.serviceConfig.StateDirectory == "mw-posix-node-process"'
   check "claim: the local zenohd is untouched" '.claimOn.zenohd == .off.zenohd and .claimOff.zenohd == .off.zenohd'

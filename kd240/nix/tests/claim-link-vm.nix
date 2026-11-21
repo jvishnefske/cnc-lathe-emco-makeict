@@ -44,6 +44,11 @@ pkgs.testers.runNixOSTest {
     };
     services.avahi.enable = true;
     users.users.alice = { isNormalUser = true; };
+    # An upgraded board: the process node's state as the shared uid left it.
+    systemd.tmpfiles.rules = [
+      "d /var/lib/mw-posix-node-process 0700 mw-posix-node mw-posix-node -"
+      "f /var/lib/mw-posix-node-process/old-trust 0600 mw-posix-node mw-posix-node - from-before"
+    ];
     environment.systemPackages = [ pkgs.socat ];
   };
   testScript = ''
@@ -61,6 +66,18 @@ pkgs.testers.runNixOSTest {
         return f"systemd-run --wait --pipe -q --uid={user} ${pkgs.bash}/bin/sh -c {shlex.quote(cmd)}"
 
     machine.wait_for_unit("multi-user.target")
+    owner = {"unit": "mw-posix-node", "process": "mw-posix-node-process"}
+
+    def probe(user, tty):
+        return machine.succeed(as_user(user, f"${pkgs.python3}/bin/python3 -I ${./tiocsti.py} {tty}")).strip()
+
+    # One uid per node; the process node's old state handed to its own.
+    machine.wait_for_unit("mw-posix-node-process.service")
+    machine.succeed("test \"$(systemctl show -p User --value mw-posix-node-process)\" = mw-posix-node-process")
+    machine.succeed("test \"$(systemctl show -p User --value mw-posix-node)\" = mw-posix-node")
+    for f in ("/var/lib/mw-posix-node-process", "/var/lib/mw-posix-node-process/old-trust"):
+        machine.succeed(f"test \"$(stat -c %U {f})\" = mw-posix-node-process")
+
     for which, node in (("unit", "mw-posix-node"), ("process", "mw-posix-node-process")):
         d = f"/run/emco-mesh-claim-{which}"
         machine.wait_for_unit(f"emco-mesh-claim-link-{which}.service")
@@ -71,7 +88,7 @@ pkgs.testers.runNixOSTest {
         # Who owns what.
         machine.succeed(f"test \"$(stat -c '%U %a' {d})\" = 'root 755'")
         machine.succeed(f"test \"$(stat -c '%U %a %F' {d}/sock)\" = 'root 600 socket'")
-        machine.succeed(f"test \"$(stat -L -c '%U %a' {d}/tty)\" = 'mw-posix-node 600'")
+        machine.succeed(f"test \"$(stat -L -c '%U %a' {d}/tty)\" = '{owner[which]} 600'")
         # The node's process (in its own namespace) has the slave open.
         machine.succeed(f"ls -l /proc/$(systemctl show -p MainPID --value {node})/fd | grep -q /dev/pts/")
 
@@ -93,6 +110,28 @@ pkgs.testers.runNixOSTest {
             timeout=60,
         )
         machine.succeed(f"chmod 0600 {d}/sock")
+
+    # Neither node, nor anyone else, can open the other node's tty: no
+    # TIOCSTI into it, no writing to it.
+    unit_tty, proc_tty = "/run/emco-mesh-claim-unit/tty", "/run/emco-mesh-claim-process/tty"
+    for user, tty in (("mw-posix-node-process", unit_tty), ("mw-posix-node", proc_tty),
+                      ("alice", unit_tty), ("alice", proc_tty)):
+        out = probe(user, tty)
+        assert out == "open: EACCES", (user, tty, out)
+
+    # And on its own tty TIOCSTI is refused, by dev.tty.legacy_tiocsti = 0.
+    sysctl = "/proc/sys/dev/tty/legacy_tiocsti"
+    machine.succeed(f"test -e {sysctl}")
+    assert machine.succeed(f"cat {sysctl}").strip() == "0"
+    for user, tty in (("mw-posix-node", unit_tty), ("mw-posix-node-process", proc_tty)):
+        out = probe(user, tty)
+        assert out == "tiocsti: EIO", (user, tty, out)
+    # The control: with the sysctl at 1 the same probe injects (its own
+    # tty becomes its controlling tty), so the probe can see it.
+    machine.succeed(f"echo 1 > {sysctl}")
+    out = probe("mw-posix-node", unit_tty)
+    machine.succeed(f"echo 0 > {sysctl}")
+    assert out == "tiocsti: ok", out
 
     # A claim link restarted is a new PTY: its node restarts with it.
     pid = machine.succeed("systemctl show -p MainPID --value mw-posix-node").strip()

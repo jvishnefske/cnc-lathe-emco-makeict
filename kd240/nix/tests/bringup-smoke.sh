@@ -19,11 +19,13 @@ ok()   { echo "ok    $*"; }
 fail() { echo "FAIL  $*"; fails=$((fails + 1)); }
 
 mkdir -p "$work/bin" "$work/tmp"
+# The stand-ins' interpreter is this bash (the Nix sandbox has no /usr/bin/env).
+bash=$(command -v bash)
 printf 'UNIT=0123456789abcdef\nPROCESS=1111111111111111\n' >"$work/ids"
 # ssh: options and the host dropped, the command looked up; every command
 # is logged one per line.
 cat >"$work/bin/ssh" <<EOS
-#!/usr/bin/env bash
+#!$bash
 while [ \$# -gt 0 ]; do case "\$1" in -o) shift 2;; -*) shift;; *@*) shift; break;; *) break;; esac; done
 cmd="\$*"
 printf '%s\n' "\$cmd" >>"$work/ssh.log"
@@ -38,7 +40,7 @@ case "\$cmd" in
 esac
 EOS
 cat >"$work/bin/scp" <<EOS
-#!/usr/bin/env bash
+#!$bash
 printf '%s\n' "\$*" >>"$work/scp.log"
 EOS
 chmod +x "$work/bin/ssh" "$work/bin/scp"

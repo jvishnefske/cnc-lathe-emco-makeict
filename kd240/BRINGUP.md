@@ -77,17 +77,25 @@ port on the KD240:
   that only root can use: root:root 0600 in a root 0755 directory, and the
   daemon also checks every client's uid (`SO_PEERCRED`) and closes anyone
   but root.
-* **Shared uid (known gap, pre-existing).** Both nodes run as one uid,
-  `mw-posix-node` (the process node's unit copies the unit node's, state
-  directories included). So either node can open the other's PTY slave,
-  which is the node's own end: it could read what root sends that node and
-  answer in its place. Neither can reach the other's socket, where the
-  claim's Origin::Serial authority comes from.
+* **One uid per node.** The unit node runs as `mw-posix-node` and the
+  process node as `mw-posix-node-process` (its existing state directory is
+  handed over at its first start). So neither node can open the other's
+  PTY slave, write to it, or push input into it with `TIOCSTI`. The process
+  node is the one that Zenoh payloads reach.
+* **No TIOCSTI.** `dev.tty.legacy_tiocsti = 0` (`nix/mesh.nix`) refuses
+  `TIOCSTI` without `CAP_SYS_ADMIN`, even on a process's own tty. The board's
+  6.18 kernel has `LEGACY_TIOCSTI` off already (nixpkgs' default from 6.2),
+  so the sysctl only makes that explicit.
+* **What remains.** Root (anyone with the admin SSH key) holds
+  Origin::Serial over a node, as with a physical port. A node's own output
+  on its slave reaches root's client, as a serial device's would.
 * `kd240-claim-link-vm` checks this under a real systemd (a VM of the
   board's release, the real `mesh.nix` and posix-node module, a stand-in
-  node): root reaches the node; the node's uid and another user cannot
+  node). Root reaches the node; the node's uid and another user cannot
   connect, and with the socket's mode opened up the daemon still refuses
-  the node's uid.
+  the node's uid. Neither node, nor another user, can open the other
+  node's tty; `TIOCSTI` on a node's own tty fails with EIO. As a control,
+  with the sysctl at 1 the same probe does inject.
 
 `scripts/claim.sh` claims a node from the laptop. socat makes a PTY on the
 laptop, joined over `ssh admin@kd240.local sudo socat -
@@ -470,7 +478,6 @@ includes it:
 | 2 | a posix-node that opens a PTY as its local port (the claim link stays off until then) | middleware `bc80998` (W4b-0), then `ptyLocalSerial = true` in `flake.nix` |
 | 2 | an mwctl that opens a PTY (`--port` on claim.sh's socat PTY) | middleware `d511c86` (H7), an mwctl built from it |
 | 2 | the fleet agent on the default configuration, or the A/B card booted | `nix/ab.nix` on a board |
-| 2 | one uid per node: both run as `mw-posix-node` (pre-existing; either can open the other's claim PTY slave and state directory, not its claim socket) | `nix/mesh.nix` (a `User=` for the process node) |
 | 3 | posix-node's `sys/*` keys over Zenoh | W4a (middleware) |
 | 3 | an `mwctl` package (`--features zenoh`) from the flake | middleware flake / lathe flake |
 | 3 | the signed control target rule for posix-node over Zenoh | W4a |

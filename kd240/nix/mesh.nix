@@ -30,10 +30,11 @@
 #                          /run/emco-mesh-claim-<node>/tty handed to the
 #                          node's uid, and a socket beside it that only root
 #                          may use (0600 root and SO_PEERCRED; scripts/claim.sh:
-#                          mwctl on the laptop, ssh, socat). Both nodes run as
-#                          one uid, mw-posix-node, so either can open the
-#                          other's slave, but not its socket (BRINGUP.md
-#                          gaps). Needs a posix-node that opens a PTY
+#                          mwctl on the laptop, ssh, socat). Each node has a
+#                          uid of its own (mw-posix-node, mw-posix-node-process),
+#                          so neither can open the other's slave, and
+#                          dev.tty.legacy_tiocsti = 0 refuses TIOCSTI even on
+#                          its own. Needs a posix-node that opens a PTY
 #                          (middleware bc80998): flake.nix kd240Mesh.
 #   emco-mesh-uplink       (uplink.enable, W4b) a SECOND zenohd, with no
 #                          listener, linking the local router to the cloud
@@ -413,6 +414,14 @@ in
         };
       };
 
+      users.users.mw-posix-node-process = { isSystemUser = true; group = "mw-posix-node-process"; };
+      users.groups.mw-posix-node-process = { };
+
+      # No TIOCSTI (pushing input into a tty) without CAP_SYS_ADMIN, even
+      # on one's own controlling tty. nixpkgs' kernels from 6.2 already
+      # default to it (LEGACY_TIOCSTI off); this keeps it so.
+      boot.kernel.sysctl."dev.tty.legacy_tiocsti" = 0;
+
       systemd.services.emco-mesh-ids = {
         description = "The lathe's payload node ids";
         serviceConfig = {
@@ -462,6 +471,12 @@ in
         # ExecStart (the claim wrapper, or the node) is the unit node's;
         # the wrapper waits for this unit's own MW_POSIX_NODE_LOCAL_SERIAL.
         serviceConfig = builtins.removeAttrs posixService.serviceConfig [ "ExecStartPre" ] // {
+          # A uid of its own: the process node is the one payloads reach
+          # over Zenoh, so it must not open the unit node's claim PTY (and
+          # TIOCSTI into it) or read its state. systemd chowns an existing
+          # StateDirectory to this user at start (an upgraded board's).
+          User = "mw-posix-node-process";
+          Group = "mw-posix-node-process";
           StateDirectory = "mw-posix-node-process";
           EnvironmentFile = [ "${run}/process.env" "-/var/lib/mw-robot/robot.env" ];
         };

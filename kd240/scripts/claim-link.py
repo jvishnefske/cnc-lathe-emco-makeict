@@ -15,11 +15,12 @@ kd240/nix/mesh.nix, claimLink). In DIR (/run/emco-mesh-claim-<node>, root
         process's own, root) is closed at once. claim.sh runs
         `sudo socat - UNIX-CONNECT:…/sock` over ssh for mwctl on the laptop.
 
-The slave is open to root and to the node's uid. Both nodes run as the
-same uid (mw-posix-node), so the other node's process could open this
-slave, which is the node's own end (it could read what root sends the node
-and answer in its place), but never the socket, which is where a claim's
-Origin::Serial authority comes from.
+The slave is open to root and to the node's uid only. Each node has a uid
+of its own (mw-posix-node, mw-posix-node-process), so neither can open the
+other's slave, and the board refuses TIOCSTI without CAP_SYS_ADMIN
+(dev.tty.legacy_tiocsti = 0), so not even a node can push input into its
+own. What a node writes to its slave reaches root's client: that is the
+node's own output, which mwctl checks as it would a serial port's.
 
 The node writes every publication to its local link as well, waiting up to
 200 ms per frame for a write. So with no client attached everything the

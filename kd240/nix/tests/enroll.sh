@@ -42,7 +42,7 @@ run() {
 expect_fail() {
     local what=$1 pat=$2; shift 2
     run "$@"
-    if [ "$rc" -ne 0 ] && grep -qiE "$pat" <<<"$err"; then
+    if [ "$rc" -ne 0 ] && grep -qiE -- "$pat" <<<"$err"; then
         ok "$what"
     else
         fail "$what (rc $rc, stderr: $(head -3 <<<"$err" | paste -sd'|' -))"

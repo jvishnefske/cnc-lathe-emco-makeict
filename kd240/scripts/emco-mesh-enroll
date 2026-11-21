@@ -2,7 +2,7 @@
 # emco-mesh-enroll: the KD240's certificate for its uplink to the cloud mesh
 # (services.emco-mesh.uplink, kd240/nix/mesh.nix; BRINGUP.md step 8).
 #
-#   emco-mesh-enroll csr [--dir D] [--id ID] [--rotate]
+#   emco-mesh-enroll csr [--dir D] [--id ID] [--rotate [--force]]
 #       a P-256 key (made once, kept on the board) and a CSR for
 #       CN kd240-<unit node id>, on stdout; the next steps on stderr
 #   emco-mesh-enroll install CERT CA [--dir D] [--no-restart]
@@ -34,7 +34,7 @@ warn_days=30
 
 usage() {
     cat >&2 <<EOF
-usage: $prog csr [--dir D] [--id ID] [--rotate]
+usage: $prog csr [--dir D] [--id ID] [--rotate [--force]]
        $prog install CERT CA [--dir D] [--no-restart]
        $prog check [--dir D]
        $prog status [--dir D]
@@ -133,9 +133,18 @@ cmd_csr() {
     mkdir -p "$dir"
     chmod 0750 "$dir"
     if is_root && getent group "$group" >/dev/null 2>&1; then chown "root:$group" "$dir"; fi
+    if [ -n "$opt_force" ] && [ -z "$opt_rotate" ]; then
+        die "--force only goes with --rotate"
+    fi
     if [ -e "$dir/key" ] && [ -n "$opt_rotate" ]; then
+        if [ -e "$dir/key.old" ] && [ -z "$opt_force" ]; then
+            die "$dir/key.old exists (an earlier rotate): move it away, or --rotate --force to replace it"
+        fi
+        # The retired key is root's alone: the uplink's group loses it.
+        chmod 0600 "$dir/key"
+        if is_root; then chown root:root "$dir/key"; fi
         mv -f "$dir/key" "$dir/key.old"
-        note "rotating: the old key is $dir/key.old"
+        note "rotating: the old key is $dir/key.old (0600, root's)"
     fi
     if [ ! -e "$dir/key" ]; then
         openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 \
@@ -236,13 +245,14 @@ cmd_status() {
 
 [ $# -gt 0 ] || usage
 cmd=$1; shift
-opt_id="" opt_rotate="" opt_no_restart="" tmp=""
+opt_id="" opt_rotate="" opt_force="" opt_no_restart="" tmp=""
 args=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --dir) dir=${2:?--dir needs a directory}; shift 2 ;;
         --id) opt_id=${2:?--id needs an id}; shift 2 ;;
         --rotate) opt_rotate=yes; shift ;;
+        --force) opt_force=yes; shift ;;
         --no-restart) opt_no_restart=yes; shift ;;
         -h | --help) usage ;;
         -*) note "unknown option $1"; usage ;;

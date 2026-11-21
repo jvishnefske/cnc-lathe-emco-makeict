@@ -296,8 +296,8 @@ KD240 itself that the repository doesn't provide yet:
 
 * The nodes can't be claimed yet. The claim link (a drained PTY per node,
   `scripts/claim.sh`) is built and tested, but it stays off until
-  middleware's posix-node and mwctl accept a PTY as a serial port (W4b-0,
-  `bc80998`, not in the pin).
+  middleware's posix-node and mwctl accept a PTY as a serial port
+  (`bc80998` and `d511c86`, not in the pin).
 * The uplink to the cloud mesh (`services.emco-mesh.uplink`, a second
   zenohd over mTLS, with `emco-mesh-enroll` for its certificate) is off
   until the mesh router is deployed and the board is enrolled (BRINGUP.md

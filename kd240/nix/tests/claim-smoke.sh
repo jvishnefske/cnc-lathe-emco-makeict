@@ -2,7 +2,7 @@
 # Smoke test of the claim path without a board: claim.sh --socket, socat's
 # PTY, socat to the claim link's socket, claim-link.py and its PTY, with a
 # stand-in node and a stand-in mwctl at the two ends (claim_fakes.py).
-# Real mwctl cannot open a PTY yet (its port.rs fails on ENOTTY), and the
+# An mwctl before middleware d511c86 cannot open a PTY (ENOTTY), and the
 # pinned posix-node cannot either, so neither is used here.
 #
 #   kd240/nix/tests/claim-smoke.sh kd240/scripts/claim-link.py kd240/scripts/claim.sh
@@ -73,7 +73,7 @@ done
 out=$("$claim" unit --host kd240.local --user admin_1 --socket "$dir/sock" --info 2>&1) && rc=0 || rc=$?
 [ "$rc" -eq 0 ] && ok "a plain --host and --user pass" || fail "plain --host/--user (rc $rc): $out"
 
-# mwctl as it is today, on a PTY.
+# An mwctl from before d511c86, on a PTY.
 printf '#!/bin/sh\necho "mwctl: serial port: Not a typewriter" >&2; exit 1\n' >"$work/mwctl-enotty"
 chmod +x "$work/mwctl-enotty"
 out=$(MWCTL=$work/mwctl-enotty "$claim" unit --socket "$dir/sock" --info 2>&1) && rc=0 || rc=$?

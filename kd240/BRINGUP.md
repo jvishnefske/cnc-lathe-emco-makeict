@@ -119,9 +119,11 @@ laptop. On the board, socat comes with the claim link.
     deploy.
   * **mwctl can't open a PTY either.** `tools/mwctl/src/port.rs` has the
     same RTS/DTR calls and fails with `serial port: Not a typewriter` on
-    socat's PTY. This was checked with the W4a and `stack/posix-node`
-    builds. It needs the same fix as `bc80998`. `claim.sh` names this
-    error when it hits it.
+    socat's PTY (checked with the W4a build and an earlier
+    `stack/posix-node` one). Middleware `d511c86` (H7, on
+    `stack/posix-node`, not in the pin) fixes it: `SerialTransport::open`
+    and `reset` tolerate ENOTTY. Use an mwctl built from it. `claim.sh`
+    names this error when an older mwctl hits it.
 * Until then the step reports **blocked (gap)**, and both nodes run
   **unclaimed**. An unclaimed node accepts any commit locally (trust on
   first use). Over Zenoh it refuses `begin`, `commit`, `start` and `bind`
@@ -439,8 +441,10 @@ includes it:
 * **posix-node opens a PTY** (`bc80998`, W4b-0). Set
   `kd240Mesh.ptyLocalSerial = true` in `flake.nix` and deploy. That turns
   the claim link on (step 2).
-* **mwctl opens a PTY.** `tools/mwctl/src/port.rs` needs the same ENOTTY
-  fix as `bc80998`. This is not written yet. `claim.sh` needs it (step 2).
+* **mwctl opens a PTY** (`d511c86`, H7: `--port` takes a PTY slave;
+  `SerialTransport::open` and `reset` tolerate ENOTTY). `claim.sh` needs an
+  mwctl built from it on the laptop (step 2); mwctl is not a flake output,
+  so build it from that rev or later.
 * **Static zenohd 1.10.1** (`f70ea67`, W4b-0). Nothing to do here:
   `kd240Mesh.zenohd` picks up `zenohd-aarch64` by itself, and the eval
   check then reports `1.10.1 from middleware`.
@@ -464,7 +468,7 @@ includes it:
 |---|---|---|
 | 1 | a freshly written image booted once (the board's card was converted in place) | a bench run |
 | 2 | a posix-node that opens a PTY as its local port (the claim link stays off until then) | middleware `bc80998` (W4b-0), then `ptyLocalSerial = true` in `flake.nix` |
-| 2 | an mwctl that opens a PTY (`--port` on claim.sh's socat PTY) | middleware, `tools/mwctl/src/port.rs` (as `bc80998`) |
+| 2 | an mwctl that opens a PTY (`--port` on claim.sh's socat PTY) | middleware `d511c86` (H7), an mwctl built from it |
 | 2 | the fleet agent on the default configuration, or the A/B card booted | `nix/ab.nix` on a board |
 | 2 | one uid per node: both run as `mw-posix-node` (pre-existing; either can open the other's claim PTY slave and state directory, not its claim socket) | `nix/mesh.nix` (a `User=` for the process node) |
 | 3 | posix-node's `sys/*` keys over Zenoh | W4a (middleware) |

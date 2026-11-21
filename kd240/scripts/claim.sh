@@ -122,7 +122,7 @@ run_mwctl() {
         case "$__out" in
             *"Not a typewriter"*)
                 echo "claim.sh: this mwctl cannot open a PTY: it deasserts RTS/DTR and fails with ENOTTY" >&2
-                echo "  (middleware tools/mwctl/src/port.rs; needs the same fix as the gateway's open_serial, bc80998)" >&2 ;;
+                echo "  (fixed in middleware d511c86, H7: use an mwctl built from that rev or later)" >&2 ;;
         esac
         if ! kill -0 "$pid" 2>/dev/null; then cat "$tmp/socat.log" >&2; fi
         return "$__rc"

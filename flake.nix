@@ -31,13 +31,37 @@
   outputs = { self, nixpkgs, nixpkgs-linuxcnc, flake-utils, rust-overlay, middleware }:
     let
       # The board's payload nodes (kd240/nix/mesh.nix): middleware's
-      # posix-node module and binary, and zenohd 1.10 from unstable (25.11
-      # has 1.4; the node's gateway is built with zenoh 1.10).
-      kd240Mesh = {
-        posixNodeModule = middleware.nixosModules.posix-node;
-        posixNode = middleware.packages.aarch64-linux.mw-posix-node;
-        zenohd = nixpkgs.legacyPackages.aarch64-linux.zenoh;
-      };
+      # posix-node module and binary, and zenohd 1.10 (the node's gateway is
+      # built with zenoh 1.10; 25.11 has 1.4).
+      #
+      # zenohd is middleware's static aarch64 build, cross-compiled here
+      # (packages.x86_64-linux.zenohd-aarch64, zenoh 1.10.1), once the pin
+      # has it (middleware f70ea67, W4b-0). Until then it is unstable's
+      # nixpkgs zenoh 1.10.0, from the cache. The eval check reports which
+      # (zenohdSource), and the config check runs the same one built for
+      # this host (zenohdHost).
+      kd240Mesh =
+        let
+          fromMiddleware = middleware.packages.x86_64-linux ? zenohd-aarch64;
+        in
+        {
+          posixNodeModule = middleware.nixosModules.posix-node;
+          posixNode = middleware.packages.aarch64-linux.mw-posix-node;
+          zenohd = middleware.packages.x86_64-linux.zenohd-aarch64
+            or nixpkgs.legacyPackages.aarch64-linux.zenoh;
+          zenohdSource =
+            if fromMiddleware then "middleware (zenohd-aarch64, static cross build)"
+            else "nixpkgs (fallback: the middleware pin has no zenohd-aarch64)";
+          zenohdHost =
+            if fromMiddleware then middleware.packages.x86_64-linux.zenohd
+            else nixpkgs.legacyPackages.x86_64-linux.zenoh;
+          # The claim link (services.emco-mesh.claimLink) gives each node a
+          # PTY as its local serial port. posix-node opens one only from
+          # middleware bc80998 (W4b-0, not pushed); the pinned 514f974 fails
+          # on it (ENOTTY deasserting RTS) and the node would exit and
+          # restart for ever. Set true with the pin bump (BRINGUP.md step 2).
+          ptyLocalSerial = false;
+        };
     in
     {
       # The Kria KD240's SD card and its over-the-network updates
@@ -143,12 +167,72 @@
           kd240-bundle = self.nixosConfigurations.kd240-ab.config.system.build.bundle;
         };
 
-        checks.emco-rules = pkgs.runCommand "emco-rules-tests" { nativeBuildInputs = [ pkgs.python3 ]; } ''
-          cd ${rulesSrc}
-          # The rules write nothing outside a temp dir, but keep HOME honest.
-          HOME=$TMPDIR python3 -B linuxcnc/sim/emco-pcturn50/tests/test_emco_rules.py
-          touch $out
-        '';
+        checks = {
+          emco-rules = pkgs.runCommand "emco-rules-tests" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+            cd ${rulesSrc}
+            # The rules write nothing outside a temp dir, but keep HOME honest.
+            HOME=$TMPDIR python3 -B linuxcnc/sim/emco-pcturn50/tests/test_emco_rules.py
+            touch $out
+          '';
+        } // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          # The board's uplink and claim link (W4b), on an x86-64 host with
+          # nothing built for aarch64 (kd240/nix/tests/uplink-eval.nix).
+          kd240-uplink-eval = import ./kd240/nix/tests/uplink-eval.nix {
+            inherit pkgs;
+            kd240 = self.nixosConfigurations.kd240;
+            inherit (kd240Mesh) zenohdSource;
+          };
+          # zenohd (this host's build of the board's) runs the uplink's
+          # generated config (kd240/nix/tests/uplink-config.nix).
+          kd240-uplink-config = import ./kd240/nix/tests/uplink-config.nix {
+            inherit pkgs;
+            kd240 = self.nixosConfigurations.kd240;
+            zenohd = kd240Mesh.zenohdHost;
+          };
+          # The claim link's PTY daemon (kd240/scripts/claim-link.py), and
+          # claim.sh through it and socat, with stand-ins for the node and
+          # mwctl.
+          kd240-claim-link = pkgs.runCommand "kd240-claim-link"
+            { nativeBuildInputs = [ pkgs.python3 pkgs.socat pkgs.shellcheck ]; } ''
+            cp ${./kd240/nix/tests/claim_fakes.py} claim_fakes.py
+            cp ${./kd240/nix/tests/claim-smoke.sh} claim-smoke.sh
+            cp ${./kd240/scripts/claim.sh} claim.sh
+            chmod +x claim-smoke.sh claim.sh
+            patchShebangs claim-smoke.sh claim.sh
+            shellcheck claim.sh claim-smoke.sh
+            python3 -I ${./kd240/nix/tests/claim_link.py} ${./kd240/scripts/claim-link.py}
+            ./claim-smoke.sh ${./kd240/scripts/claim-link.py} ./claim.sh
+            touch $out
+          '';
+          # The claim link under a real systemd: mesh.nix and middleware's
+          # posix-node module in a VM of the board's release, a stand-in node
+          # (kd240/nix/tests/claim-link-vm.nix). Needs KVM.
+          kd240-claim-link-vm = import ./kd240/nix/tests/claim-link-vm.nix {
+            pkgs = nixpkgs-linuxcnc.legacyPackages.${system};
+            inherit (kd240Mesh) posixNodeModule;
+          };
+          # bringup.sh's argument and board-input handling, against a
+          # stand-in ssh and scp (kd240/nix/tests/bringup-smoke.sh).
+          kd240-bringup = pkgs.runCommand "kd240-bringup"
+            { nativeBuildInputs = [ pkgs.openssl pkgs.shellcheck pkgs.iproute2 ]; } ''
+            cp ${./kd240/scripts/bringup.sh} bringup.sh
+            cp ${./kd240/nix/tests/bringup-smoke.sh} bringup-smoke.sh
+            cp ${./kd240/scripts/emco-mesh-enroll} emco-mesh-enroll
+            chmod +x bringup.sh bringup-smoke.sh emco-mesh-enroll
+            patchShebangs bringup.sh bringup-smoke.sh emco-mesh-enroll
+            shellcheck bringup.sh bringup-smoke.sh
+            ./bringup-smoke.sh ./bringup.sh ./emco-mesh-enroll
+            touch $out
+          '';
+          # emco-mesh-enroll (the board's key, CSR and certificate) against
+          # a throwaway CA, as this host's build of the board's script.
+          kd240-enroll = pkgs.runCommand "kd240-enroll"
+            { nativeBuildInputs = [ pkgs.openssl pkgs.shellcheck ]; } ''
+            shellcheck ${./kd240/scripts/emco-mesh-enroll} ${./kd240/nix/tests/enroll.sh}
+            bash ${./kd240/nix/tests/enroll.sh} ${pkgs.callPackage ./kd240/nix/enroll.nix { }}/bin/emco-mesh-enroll
+            touch $out
+          '';
+        };
 
         apps.sim = dockerApp "emco-sim" ''
           echo "  open http://localhost:8080/vnc.html?autoconnect=1&resize=scale"

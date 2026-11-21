@@ -22,6 +22,29 @@
 #                          directory and id
 #   emco-mesh-announce     mDNS: `_emco-lathe._tcp` on the UI's port, its TXT
 #                          naming both node ids (for M7's autoprobe)
+#   emco-mesh-claim-link-{unit,process}
+#                          (claimLink.enable, W4b) each node's local serial
+#                          link (MW_POSIX_NODE_LOCAL_SERIAL, where a node is
+#                          claimed): a root unit running scripts/claim-link.py
+#                          makes a PTY, always drained, with its slave at
+#                          /run/emco-mesh-claim-<node>/tty handed to the
+#                          node's uid, and a socket beside it that only root
+#                          may use (0600 root and SO_PEERCRED; scripts/claim.sh:
+#                          mwctl on the laptop, ssh, socat). Each node has a
+#                          uid of its own (mw-posix-node, mw-posix-node-process),
+#                          so neither can open the other's slave, and
+#                          dev.tty.legacy_tiocsti = 0 refuses TIOCSTI even on
+#                          its own. Needs a posix-node that opens a PTY
+#                          (middleware bc80998): flake.nix kd240Mesh.
+#   emco-mesh-uplink       (uplink.enable, W4b) a SECOND zenohd, with no
+#                          listener, linking the local router to the cloud
+#                          mesh over mTLS (tls/mesh.updates.<site>:443), its
+#                          default-deny ACL exporting the payloads' sys keys
+#                          and the process state and nothing of app/unit/**.
+#                          The local zenohd above is the same with it on or
+#                          off, so a bad certificate never touches the board's
+#                          own mesh. Its certificate: emco-mesh-enroll
+#                          (BRINGUP.md step 8).
 #
 # The payloads themselves are not in the image: they are signed and
 # installed per node with mwctl (cnc/README.md), so a fresh card runs both
@@ -58,14 +81,108 @@ let
     chmod 0644 ${run}/*
     echo "emco-mesh: unit $unit, process $proc"
   '';
-  zenohdConfig = pkgs.writeText "zenohd.json5" (builtins.toJSON {
+  localConfig = {
     mode = "router";
     listen.endpoints = [ router ];
     scouting.multicast.enabled = false;
     scouting.gossip.enabled = false;
     # No plugins (no REST, no storage): a router and nothing else.
     plugins_loading.enabled = false;
-  });
+  };
+  zenohdConfig = pkgs.writeText "zenohd.json5" (builtins.toJSON localConfig);
+
+  # The uplink (emco-mesh-uplink, uplink.enable): a router of its own with no
+  # listener (a router's default is tcp/[::]:7447), linked to the local
+  # router over loopback tcp and to the cloud mesh over mTLS. A failed
+  # connect never ends it: zenohd retries in the background, and again after
+  # a link drops, reading the TLS files at each attempt.
+  uplinkConfig = {
+    mode = "router";
+    listen.endpoints = [ ];
+    connect = {
+      endpoints = [ router up.endpoint ];
+      exit_on_failure = false;
+      timeout_ms = -1;
+      retry = { period_init_ms = 1000; period_max_ms = 60000; period_increase_factor = 2; };
+    };
+    scouting.multicast.enabled = false;
+    scouting.gossip.enabled = false;
+    plugins_loading.enabled = false;
+    # Name verification stays on: the router's SAN must be the endpoint's host.
+    transport.link.tls = {
+      root_ca_certificate = "${up.tlsDir}/ca";
+      connect_certificate = "${up.tlsDir}/cert";
+      connect_private_key = "${up.tlsDir}/key";
+      enable_mtls = true;
+    };
+    access_control = uplinkAcl;
+  };
+  # Default deny. A link matches subjects by its protocol: the loopback
+  # link to the local router (tcp) may carry anything, the mesh link (tls)
+  # only what is listed. `**` does not match a verbatim `@` chunk, so the
+  # local rule names @/** (admin space) and @mw/** (sys keys) as well.
+  # Ingress on the tls link is what the mesh sends the board; egress is what
+  # the board shows the mesh.
+  #   in   queries for the payloads' read-only and signed sys keys (no
+  #        trust/claim, board, peers, fw/*, log, status), and the mesh's
+  #        subscriptions to the process state (so the state's puts flow)
+  #   out  the payloads' sys queryables and their replies, and the process
+  #        state; nothing of the local clients' other declarations
+  #   never  app/unit/** either way: a unit's commands come from the board
+  uplinkAcl =
+    let
+      all = [ "put" "delete" "declare_subscriber" "query" "reply" "declare_queryable" "liveliness_token" "declare_liveliness_subscriber" "liveliness_query" ];
+      sys = k: "@mw/node/*/sys/${k}";
+    in
+    {
+      enabled = true;
+      default_permission = "deny";
+      subjects = [
+        { id = "local"; link_protocols = [ "tcp" ]; }
+        { id = "uplink"; link_protocols = [ "tls" ]; }
+      ];
+      rules = [
+        { id = "local-all"; permission = "allow"; flows = [ "ingress" "egress" ]; messages = all; key_exprs = [ "**" "@/**" "@mw/**" ]; }
+        { id = "no-unit"; permission = "deny"; flows = [ "ingress" "egress" ]; messages = [ "put" "delete" "declare_subscriber" "query" "reply" "declare_queryable" ]; key_exprs = [ "app/unit/**" ]; }
+        {
+          id = "cloud-queries-in";
+          permission = "allow";
+          flows = [ "ingress" ];
+          messages = [ "query" ];
+          key_exprs = map sys [
+            "info"
+            "trust/info"
+            "manifest"
+            "manifest/cm"
+            "payload/binding"
+            "payload/start"
+            "payload/stop"
+            "payload/bind"
+            "loader/begin"
+            "loader/chunk"
+            "loader/commit"
+          ];
+        }
+        { id = "cloud-subscribes-in"; permission = "allow"; flows = [ "ingress" ]; messages = [ "declare_subscriber" ]; key_exprs = [ "app/proc/*/state" ]; }
+        { id = "board-queryables-out"; permission = "allow"; flows = [ "egress" ]; messages = [ "declare_queryable" ]; key_exprs = [ (sys "**") ]; }
+        { id = "board-replies-out"; permission = "allow"; flows = [ "egress" ]; messages = [ "reply" ]; key_exprs = [ "@mw/node/**" ]; }
+        { id = "board-state-out"; permission = "allow"; flows = [ "egress" ]; messages = [ "put" ]; key_exprs = [ "app/proc/*/state" ]; }
+      ];
+      policies = [
+        { id = "local"; rules = [ "local-all" ]; subjects = [ "local" ]; }
+        { id = "uplink-deny"; rules = [ "no-unit" ]; subjects = [ "uplink" ]; }
+        { id = "uplink-allow"; rules = [ "cloud-queries-in" "cloud-subscribes-in" "board-queryables-out" "board-replies-out" "board-state-out" ]; subjects = [ "uplink" ]; }
+      ];
+    };
+  uplinkConfigFile = pkgs.writeText "zenohd-uplink.json5" (builtins.toJSON uplinkConfig);
+  enroll = pkgs.callPackage ./enroll.nix { inherit (up) tlsDir; };
+  expiry = pkgs.writeShellScript "emco-mesh-uplink-expiry" ''
+    if ! ${enroll}/bin/emco-mesh-enroll check --dir ${up.tlsDir}; then
+      echo "emco-mesh-uplink-expiry: the uplink's certificate fails its check: stopping emco-mesh-uplink (emco-mesh-enroll status)" >&2
+      systemctl stop emco-mesh-uplink.service
+      exit 1
+    fi
+  '';
   announce = pkgs.writeShellScript "emco-mesh-announce" ''
     set -eu
     . ${run}/ids
@@ -73,6 +190,65 @@ let
       "unit=$UNIT" "process=$PROCESS" "zenoh=loopback"
   '';
   posixService = config.systemd.services.mw-posix-node;
+  up = cfg.uplink;
+  claim = cfg.claimLink.enable;
+  claimDir = which: "emco-mesh-claim-${which}";
+  # The node's command as middleware's module has it.
+  nodeExec = lib.escapeShellArgs ([ (lib.getExe cfg.posixNodePackage) ] ++ config.services.mw-posix-node.args);
+  # ExecStart of both node units with the claim link: wait up to 5 s for
+  # the claim link's tty (its root unit makes it), then the node, exec'd. A
+  # claim link that is not there never keeps the node down: the node then
+  # starts without a local link, and says so in the journal.
+  claimWrapper = pkgs.writeShellScript "emco-mesh-claim-node" ''
+    tty=''${MW_POSIX_NODE_LOCAL_SERIAL:-}
+    i=0
+    while [ "$i" -lt 50 ] && ! { [ -r "$tty" ] && [ -w "$tty" ]; }; do
+      ${pkgs.coreutils}/bin/sleep 0.1
+      i=$((i + 1))
+    done
+    if [ -r "$tty" ] && [ -w "$tty" ]; then
+      echo "emco-mesh-claim-node: local link $tty, claim with kd240/scripts/claim.sh" >&2
+    else
+      echo "emco-mesh-claim-node: NO CLAIM LINK ($tty missing or not ours after 5 s): starting the node without MW_POSIX_NODE_LOCAL_SERIAL" >&2
+      unset MW_POSIX_NODE_LOCAL_SERIAL
+    fi
+    exec "$@"
+  '';
+  # The claim link of one node, as root: the PTY (its slave handed to the
+  # node's user) and the socket, root's alone (mode 0600 and SO_PEERCRED).
+  # systemd binds the host's /dev/pts into a PrivateDevices /dev and allows
+  # char-pts, so both this unit and the node keep PrivateDevices and still
+  # meet on the same PTY.
+  claimLinkUnit = which: user: {
+    description = "Claim link of the ${which} node: its local serial PTY and root's socket";
+    wantedBy = [ "multi-user.target" ];
+    serviceConfig = {
+      ExecStart = "${pkgs.python3}/bin/python3 -I ${../scripts/claim-link.py} --dir /run/${claimDir which} --owner ${user} --allow-uid 0";
+      RuntimeDirectory = claimDir which;
+      RuntimeDirectoryMode = "0755";
+      Restart = "always";
+      RestartSec = "2s";
+      CapabilityBoundingSet = "CAP_CHOWN";
+      NoNewPrivileges = true;
+      PrivateDevices = true;
+      ProtectSystem = "strict";
+      ProtectHome = true;
+      PrivateTmp = true;
+      ProtectKernelTunables = true;
+      ProtectKernelModules = true;
+      ProtectControlGroups = true;
+      RestrictAddressFamilies = [ "AF_UNIX" ];
+      RestrictNamespaces = true;
+      LockPersonality = true;
+      MemoryMax = "32M";
+    };
+  };
+  claimDeps = which: lib.optionalAttrs claim (
+    let c = "emco-mesh-claim-link-${which}.service"; in { wants = [ c ]; after = [ c ]; partOf = [ c ]; }
+  );
+  claimEnv = which: lib.optionalAttrs claim {
+    MW_POSIX_NODE_LOCAL_SERIAL = "/run/${claimDir which}/tty";
+  };
   needsIds = {
     after = [ "emco-mesh-ids.service" "zenohd.service" ];
     requires = [ "emco-mesh-ids.service" ];
@@ -140,6 +316,50 @@ in
       description = "The lathe service's port, as announced over mDNS.";
     };
 
+    uplink = {
+      enable = mkEnableOption "the router-to-router mTLS uplink to the cloud mesh (a second zenohd, emco-mesh-uplink)";
+
+      endpoint = mkOption {
+        type = types.str;
+        default = "tls/mesh.updates.vishnefske.com:443";
+        description = ''
+          The cloud mesh router, `tls/<host>:<port>`. The host must be the
+          name in the router certificate's SAN (zenoh verifies it).
+        '';
+      };
+
+      tlsDir = mkOption {
+        type = types.str;
+        default = "/var/lib/emco-mesh/tls";
+        description = ''
+          The uplink's certificate: `ca` (the Zenoh CA), `cert` (this
+          board's, CN kd240-<unit node id>) and `key` (made on the board by
+          `emco-mesh-enroll csr`; it never leaves it).
+        '';
+      };
+    };
+
+    claimLink.enable = mkOption {
+      type = types.bool;
+      default = true;
+      description = ''
+        A local serial link for each node, so it can be claimed: a PTY made
+        by a root unit per node (emco-mesh-claim-link-<node>), always
+        drained, its slave handed to the node's uid, with a root-only socket
+        beside it (/run/emco-mesh-claim-{unit,process}/sock, 0600 root and
+        checked by SO_PEERCRED) for kd240/scripts/claim.sh.
+        Needs a mw-posix-node that accepts a PTY as its local serial port
+        (middleware bc80998): an older one fails to open it and exits.
+      '';
+    };
+
+    generated = mkOption {
+      internal = true;
+      readOnly = true;
+      type = types.attrs;
+      description = "The zenohd configurations this module generates, for the eval check (nix/tests/uplink-eval.nix).";
+    };
+
     fleetInterlock = mkOption {
       type = types.bool;
       default = false;
@@ -153,6 +373,27 @@ in
 
   config = mkIf cfg.enable (lib.mkMerge [
     {
+      services.emco-mesh.generated = {
+        inherit localConfig;
+      } // lib.optionalAttrs up.enable {
+        inherit uplinkConfig;
+      };
+
+      assertions = [
+        {
+          assertion = !up.enable || lib.match "tls/[^/ ]+:[0-9]+" up.endpoint != null;
+          message = "services.emco-mesh.uplink.endpoint must be tls/<host>:<port> (mTLS only), not ${up.endpoint}";
+        }
+        {
+          assertion = !up.enable || lib.hasPrefix "/" up.tlsDir;
+          message = "services.emco-mesh.uplink.tlsDir must be an absolute path, not ${up.tlsDir}";
+        }
+        {
+          assertion = !up.enable || lib.versionAtLeast cfg.zenohdPackage.version "1.10";
+          message = "services.emco-mesh.uplink needs zenohd 1.10 or later (its ACL and TLS settings); zenohdPackage is ${cfg.zenohdPackage.version}";
+        }
+      ];
+
       systemd.services.zenohd = {
         description = "Zenoh router for the lathe's payload nodes (loopback only)";
         wantedBy = [ "multi-user.target" ];
@@ -173,6 +414,14 @@ in
         };
       };
 
+      users.users.mw-posix-node-process = { isSystemUser = true; group = "mw-posix-node-process"; };
+      users.groups.mw-posix-node-process = { };
+
+      # No TIOCSTI (pushing input into a tty) without CAP_SYS_ADMIN, even
+      # on one's own controlling tty. nixpkgs' kernels from 6.2 already
+      # default to it (LEGACY_TIOCSTI off); this keeps it so.
+      boot.kernel.sysctl."dev.tty.legacy_tiocsti" = 0;
+
       systemd.services.emco-mesh-ids = {
         description = "The lathe's payload node ids";
         serviceConfig = {
@@ -186,7 +435,7 @@ in
         enable = true;
         package = cfg.posixNodePackage;
         zenohRouter = router;
-        environment = {
+        environment = claimEnv "unit" // {
           MW_POSIX_NODE_DRIVER = cfg.driver;
           # Phase commands and segments for this unit (the payload
           # subscribes to its own node's keys only).
@@ -196,10 +445,14 @@ in
         };
       };
       systemd.services.mw-posix-node = needsIds // {
-        serviceConfig.EnvironmentFile = lib.mkForce [
-          "${run}/unit.env"
-          "-/var/lib/mw-robot/robot.env"
-        ];
+        serviceConfig = {
+          EnvironmentFile = lib.mkForce [
+            "${run}/unit.env"
+            "-/var/lib/mw-robot/robot.env"
+          ];
+        } // lib.optionalAttrs claim {
+          ExecStart = lib.mkForce "${claimWrapper} ${nodeExec}";
+        };
       };
 
       # A node hosts one payload, so the process model gets a node of its
@@ -207,7 +460,7 @@ in
       systemd.services.mw-posix-node-process = needsIds // {
         description = "Linux payload host: the lathe's process model";
         wantedBy = [ "multi-user.target" ];
-        environment = builtins.removeAttrs posixService.environment [ "PATH" ] // {
+        environment = builtins.removeAttrs posixService.environment [ "PATH" "MW_POSIX_NODE_LOCAL_SERIAL" ] // claimEnv "process" // {
           MW_PORT = toString (config.services.mw-posix-node.port + 1);
           MW_POSIX_NODE_STATE = "/var/lib/mw-posix-node-process";
           MW_POSIX_NODE_DRIVER = "none";
@@ -215,7 +468,15 @@ in
           MW_GATEWAY_DOWNLINK = "app/proc/**,app/unit/**";
         };
         unitConfig.StartLimitIntervalSec = 0;
+        # ExecStart (the claim wrapper, or the node) is the unit node's;
+        # the wrapper waits for this unit's own MW_POSIX_NODE_LOCAL_SERIAL.
         serviceConfig = builtins.removeAttrs posixService.serviceConfig [ "ExecStartPre" ] // {
+          # A uid of its own: the process node is the one payloads reach
+          # over Zenoh, so it must not open the unit node's claim PTY (and
+          # TIOCSTI into it) or read its state. systemd chowns an existing
+          # StateDirectory to this user at start (an upgraded board's).
+          User = "mw-posix-node-process";
+          Group = "mw-posix-node-process";
           StateDirectory = "mw-posix-node-process";
           EnvironmentFile = [ "${run}/process.env" "-/var/lib/mw-robot/robot.env" ];
         };
@@ -234,6 +495,75 @@ in
         };
       };
     }
+
+    (mkIf claim {
+      systemd.services.emco-mesh-claim-link-unit = claimLinkUnit "unit" posixService.serviceConfig.User;
+      systemd.services.emco-mesh-claim-link-process =
+        claimLinkUnit "process" config.systemd.services.mw-posix-node-process.serviceConfig.User;
+      # A new claim link is a new PTY: the node restarts with it.
+      systemd.services.mw-posix-node = claimDeps "unit";
+      systemd.services.mw-posix-node-process = claimDeps "process";
+      # For claim.sh: `sudo socat - UNIX-CONNECT:/run/emco-mesh-claim-*/sock`.
+      environment.systemPackages = [ pkgs.socat ];
+    })
+
+    (mkIf up.enable {
+      users.users.emco-mesh-uplink = { isSystemUser = true; group = "emco-mesh-uplink"; };
+      users.groups.emco-mesh-uplink = { };
+      # The key is root's, readable by the uplink's group (emco-mesh-enroll).
+      systemd.tmpfiles.rules = [
+        "d /var/lib/emco-mesh 0755 root root -"
+        "d ${up.tlsDir} 0750 root emco-mesh-uplink -"
+      ];
+      environment.systemPackages = [ enroll ];
+
+      # Not ordered after time-sync.target: an offline board would hold the
+      # uplink's start job, multi-user.target and nixos-rebuild switch on
+      # it. The KD240 has no RTC, so until timesyncd syncs, a certificate
+      # can look not yet valid: ExecStartPre's check says so (check the
+      # clock) and Restart= tries again every 2 minutes.
+      systemd.services.emco-mesh-uplink = {
+        description = "Zenoh uplink: the lathe's router to the cloud mesh (mTLS)";
+        wantedBy = [ "multi-user.target" ];
+        wants = [ "network-online.target" "zenohd.service" ];
+        after = [ "network-online.target" "zenohd.service" ];
+        unitConfig.StartLimitIntervalSec = 0;
+        serviceConfig = {
+          # As root (the key is 0640): no certificate, or a bad one, and
+          # the uplink does not start; the local zenohd is not touched.
+          ExecStartPre = "+${enroll}/bin/emco-mesh-enroll check --dir ${up.tlsDir}";
+          ExecStart = "${lib.getExe' cfg.zenohdPackage "zenohd"} --config ${uplinkConfigFile}";
+          User = "emco-mesh-uplink";
+          Group = "emco-mesh-uplink";
+          Restart = "on-failure";
+          RestartSec = "2min";
+          NoNewPrivileges = true;
+          ProtectSystem = "strict";
+          ProtectHome = true;
+          PrivateTmp = true;
+          PrivateDevices = true;
+          RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" "AF_NETLINK" ];
+          MemoryMax = "128M";
+        };
+      };
+
+      # A TLS session outlives its certificate, and once it drops the
+      # reconnects fail for ever with the unit still active. So once a day
+      # the same check runs, and a failing certificate stops the uplink
+      # (and fails this unit) instead: a visible stop, not a silent retry.
+      # `emco-mesh-enroll install` starts it again.
+      systemd.services.emco-mesh-uplink-expiry = {
+        description = "Stop the uplink when its certificate fails emco-mesh-enroll check";
+        serviceConfig = {
+          Type = "oneshot";
+          ExecStart = expiry;
+        };
+      };
+      systemd.timers.emco-mesh-uplink-expiry = {
+        wantedBy = [ "timers.target" ];
+        timerConfig.OnCalendar = "daily";
+      };
+    })
 
     (mkIf cfg.ui {
       services.emco-kd240.mesh = {

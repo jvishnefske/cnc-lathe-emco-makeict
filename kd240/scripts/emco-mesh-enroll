@@ -1,0 +1,269 @@
+#!/usr/bin/env bash
+# emco-mesh-enroll: the KD240's certificate for its uplink to the cloud mesh
+# (services.emco-mesh.uplink, kd240/nix/mesh.nix; BRINGUP.md step 8).
+#
+#   emco-mesh-enroll csr [--dir D] [--id ID] [--rotate [--force]]
+#       a P-256 key (made once, kept on the board) and a CSR for
+#       CN kd240-<unit node id>, on stdout; the next steps on stderr
+#   emco-mesh-enroll install CERT CA [--dir D] [--no-restart]
+#       checks CERT and CA against the key and this board, then puts them
+#       in place and restarts emco-mesh-uplink
+#   emco-mesh-enroll check [--dir D]
+#       the same checks on what is installed: the uplink's ExecStartPre and
+#       its daily expiry timer; non-zero with one line per problem
+#   emco-mesh-enroll status [--dir D]
+#       the certificate, the unit, the link
+#
+# The TLS dir holds ca, cert and key (the names edge-ca's Secrets use). The
+# board's identity is its UNIT node id (/run/emco-mesh/ids), the id sys/info
+# and mDNS show; the CN is kd240-<id>, as `edge-ca issue --ou kd240 <id>`
+# makes it. A reflashed card has a new machine id, so a new id: check then
+# reports the old certificate as another board's.
+#
+# For tests: EMCO_ENROLL_DIR (the TLS dir, and no root needed), EMCO_MESH_IDS
+# (the ids file), EMCO_MACHINE_ID (the machine-id file).
+set -euo pipefail
+
+prog=emco-mesh-enroll
+unit=emco-mesh-uplink
+group=emco-mesh-uplink
+ids_file=${EMCO_MESH_IDS:-/run/emco-mesh/ids}
+machine_id=${EMCO_MACHINE_ID:-/etc/machine-id}
+dir=${EMCO_ENROLL_DIR:-${EMCO_ENROLL_DEFAULT_DIR:-/var/lib/emco-mesh/tls}}
+warn_days=30
+
+usage() {
+    cat >&2 <<EOF
+usage: $prog csr [--dir D] [--id ID] [--rotate [--force]]
+       $prog install CERT CA [--dir D] [--no-restart]
+       $prog check [--dir D]
+       $prog status [--dir D]
+EOF
+    exit 2
+}
+die() { printf '%s: %s\n' "$prog" "$*" >&2; exit 1; }
+note() { printf '%s: %s\n' "$prog" "$*" >&2; }
+
+# Writing the real TLS dir is root's (the key is the board's identity).
+need_root() {
+    if [ -z "${EMCO_ENROLL_DIR:-}" ] && [ "$(id -u)" -ne 0 ]; then
+        die "$1 must run as root (sudo $prog $1)"
+    fi
+}
+is_root() { [ "$(id -u)" -eq 0 ]; }
+
+# The unit node id: --id, else /run/emco-mesh/ids, else derived from the
+# machine id exactly as mesh.nix's emco-mesh-ids does.
+unit_id() {
+    local id=${opt_id:-}
+    if [ -z "$id" ] && [ -r "$ids_file" ]; then
+        id=$(sed -n 's/^UNIT=//p' "$ids_file" | head -1)
+    fi
+    if [ -z "$id" ]; then
+        [ -r "$machine_id" ] || die "no $ids_file and no $machine_id: give --id"
+        id=$(printf '%s\0%s' mw-pi-node/node-id/v1 "$(tr -d '\n' <"$machine_id")" | sha256sum | cut -c1-16)
+    fi
+    case "$id" in
+        *[!0-9a-f]* | "") die "the id must be 16 lowercase hex digits: '$id'" ;;
+    esac
+    [ ${#id} -eq 16 ] || die "the id must be 16 lowercase hex digits: '$id'"
+    printf '%s\n' "$id"
+}
+
+# The CN of a certificate.
+cert_cn() {
+    openssl x509 -in "$1" -noout -subject -nameopt RFC2253 2>/dev/null \
+        | sed 's/^subject=//' | tr ',' '\n' | sed -n 's/^CN=//p' | head -1
+}
+cert_date() { # cert startdate|enddate -> epoch seconds
+    local d
+    d=$(openssl x509 -in "$1" -noout "-$2" -dateopt iso_8601 2>/dev/null | cut -d= -f2-)
+    date -u -d "$d" +%s
+}
+
+# verify CERT CA KEY ID [CERT-NAME CA-NAME]: one line per problem on
+# stderr; status = #problems. The names are what messages call the files
+# (install checks temp copies of the files it was given).
+verify() {
+    local cert=$1 ca=$2 key=$3 id=$4 n=0 cert_name=${5:-$1} ca_name=${6:-$2}
+    problem() { note "$*"; n=$((n + 1)); }
+    [ -s "$key" ] || problem "no key in $key: run $prog csr first"
+    [ -s "$cert" ] || problem "no certificate in $cert: $prog install CERT CA (BRINGUP.md step 8)"
+    [ -s "$ca" ] || problem "no CA in $ca: $prog install CERT CA (the Zenoh CA, edge-ca ca --zenoh)"
+    [ "$n" -eq 0 ] || return "$n"
+    if ! openssl x509 -in "$cert" -noout 2>/dev/null; then
+        problem "$cert_name is not a PEM certificate"
+        return "$n"
+    fi
+    openssl x509 -in "$ca" -noout 2>/dev/null || { problem "$ca_name is not a PEM certificate"; return "$n"; }
+
+    local now nb na
+    now=$(date -u +%s)
+    nb=$(cert_date "$cert" startdate)
+    na=$(cert_date "$cert" enddate)
+    if [ "$nb" -gt "$now" ]; then
+        problem "the certificate is not valid until $(date -u -d "@$nb" '+%F %T') UTC and the clock says $(date -u '+%F %T'): check the clock (the KD240 has no RTC; timedatectl, timesyncd)"
+    fi
+    if [ "$na" -le "$now" ]; then
+        problem "the certificate expired on $(date -u -d "@$na" '+%F %T') UTC: renew it ($prog csr, edge-ca issue, $prog install)"
+    fi
+    if ! diff <(openssl x509 -in "$cert" -noout -pubkey 2>/dev/null) \
+              <(openssl pkey -in "$key" -pubout 2>/dev/null) >/dev/null; then
+        problem "the certificate is not for this board's key ($key): was it issued from this board's CSR?"
+    fi
+    local out
+    if ! out=$(openssl verify -no_check_time -purpose sslclient -CAfile "$ca" "$cert" 2>&1); then
+        problem "the certificate does not chain to the CA in $ca_name for client use: $(printf '%s' "$out" | grep -m1 -i error || printf '%s' "$out" | tail -1)"
+    fi
+    local cn
+    cn=$(cert_cn "$cert")
+    if [ "$cn" != "kd240-$id" ]; then
+        problem "the certificate is for CN ${cn:-<none>} and this board is kd240-$id (its unit node id; a reflashed card has a new machine id)"
+    fi
+    return "$n"
+}
+
+# ------------------------------------------------------------------ commands
+
+cmd_csr() {
+    need_root csr
+    local id
+    id=$(unit_id)
+    umask 077
+    mkdir -p "$dir"
+    chmod 0750 "$dir"
+    if is_root && getent group "$group" >/dev/null 2>&1; then chown "root:$group" "$dir"; fi
+    if [ -n "$opt_force" ] && [ -z "$opt_rotate" ]; then
+        die "--force only goes with --rotate"
+    fi
+    if [ -e "$dir/key" ] && [ -n "$opt_rotate" ]; then
+        if [ -e "$dir/key.old" ] && [ -z "$opt_force" ]; then
+            die "$dir/key.old exists (an earlier rotate): move it away, or --rotate --force to replace it"
+        fi
+        # The retired key is root's alone: the uplink's group loses it.
+        chmod 0600 "$dir/key"
+        if is_root; then chown root:root "$dir/key"; fi
+        mv -f "$dir/key" "$dir/key.old"
+        note "rotating: the old key is $dir/key.old (0600, root's)"
+    fi
+    if [ ! -e "$dir/key" ]; then
+        openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 \
+            -pkeyopt ec_param_enc:named_curve -out "$dir/key.new" 2>/dev/null
+        # The uplink's zenohd runs as $group and reads the key.
+        chmod 0640 "$dir/key.new"
+        if is_root && getent group "$group" >/dev/null 2>&1; then chown "root:$group" "$dir/key.new"; fi
+        mv -f "$dir/key.new" "$dir/key"
+        note "a new key in $dir/key (it never leaves the board)"
+    else
+        note "using the key in $dir/key (--rotate for a new one)"
+    fi
+    # edge-ca sets the subject itself; only the public key counts.
+    openssl req -new -key "$dir/key" -subj "/CN=kd240-$id/OU=kd240/O=vishnefske-edge" \
+        -sha256 -out "$dir/csr.pem"
+    chmod 0644 "$dir/csr.pem"
+    cat "$dir/csr.pem"
+    cat >&2 <<EOF
+
+$prog: the CSR for kd240-$id is above (and in $dir/csr.pem). Next:
+  # on the laptop
+  ssh admin@kd240.local sudo $prog csr > kd240-$id.csr
+  # on the CA host (edge-ca, the Zenoh CA)
+  edge-ca issue --ou kd240 $id --csr kd240-$id.csr --out kd240-$id.crt
+  edge-ca ca --zenoh > zenoh-ca.pem
+  # back to the board
+  scp kd240-$id.crt zenoh-ca.pem admin@kd240.local:/tmp/
+  ssh admin@kd240.local sudo $prog install /tmp/kd240-$id.crt /tmp/zenoh-ca.pem
+EOF
+}
+
+cmd_install() {
+    [ ${#args[@]} -eq 2 ] || usage
+    need_root install
+    local cert=${args[0]} ca=${args[1]} id
+    [ -r "$cert" ] || die "$cert: no such file"
+    [ -r "$ca" ] || die "$ca: no such file"
+    id=$(unit_id)
+    [ -d "$dir" ] || die "no $dir: run $prog csr first"
+    tmp=$(mktemp -d "$dir/.install.XXXXXX")
+    trap 'rm -rf "$tmp"' EXIT
+    cp "$cert" "$tmp/cert"
+    cp "$ca" "$tmp/ca"
+    if ! verify "$tmp/cert" "$tmp/ca" "$dir/key" "$id" "$cert" "$ca"; then
+        die "not installed: nothing in $dir was changed"
+    fi
+    chmod 0644 "$tmp/cert" "$tmp/ca"
+    mv -f "$tmp/ca" "$dir/ca"
+    mv -f "$tmp/cert" "$dir/cert"
+    rm -rf "$tmp"
+    note "installed kd240-$id's certificate in $dir (until $(date -u -d "@$(cert_date "$dir/cert" enddate)" '+%F') UTC)"
+    if [ -n "$opt_no_restart" ]; then return 0; fi
+    if ! systemctl cat "$unit.service" >/dev/null 2>&1; then
+        note "no $unit.service: set services.emco-mesh.uplink.enable and deploy"
+        return 0
+    fi
+    systemctl restart "$unit.service"
+    note "restarted $unit"
+}
+
+cmd_check() {
+    local id
+    id=$(unit_id)
+    verify "$dir/cert" "$dir/ca" "$dir/key" "$id" || die "$dir is not ready for the uplink"
+    if ! openssl x509 -in "$dir/cert" -noout -checkend $((warn_days * 86400)) >/dev/null; then
+        local left=$(( ($(cert_date "$dir/cert" enddate) - $(date -u +%s)) / 86400 ))
+        note "warning: the certificate expires in $left day(s): renew it ($prog csr, edge-ca issue, $prog install)"
+    fi
+    note "ok: kd240-$id, valid until $(date -u -d "@$(cert_date "$dir/cert" enddate)" '+%F %T') UTC"
+}
+
+cmd_status() {
+    local id
+    id=$(unit_id)
+    printf 'board        kd240-%s (unit node id)\n' "$id"
+    printf 'tls dir      %s: %s\n' "$dir" "$(find "$dir" -mindepth 1 -maxdepth 1 -printf '%f ' 2>/dev/null || echo missing)"
+    if [ -s "$dir/cert" ]; then
+        printf 'certificate  CN %s\n' "$(cert_cn "$dir/cert")"
+        openssl x509 -in "$dir/cert" -noout -subject -issuer -startdate -enddate -nameopt RFC2253 2>/dev/null \
+            | sed 's/^/             /'
+    else
+        printf 'certificate  none\n'
+    fi
+    if verify "$dir/cert" "$dir/ca" "$dir/key" "$id" 2>/dev/null; then
+        printf 'check        ok\n'
+    else
+        printf 'check        FAILS (%s check)\n' "$prog"
+    fi
+    printf 'unit         %s: %s\n' "$unit" "$(systemctl is-active "$unit.service" 2>/dev/null || true)"
+    # The uplink's own connections only (the fleet agent may use 443 too);
+    # -p needs root, as status normally runs.
+    local links
+    links=$(ss -Htnp state established '( dport = :443 )' 2>/dev/null | grep '"zenohd"' | awk '{print $3 " -> " $4}' || true)
+    printf 'link         %s\n' "${links:-no zenohd connection established to port 443}"
+}
+
+# ------------------------------------------------------------------ main
+
+[ $# -gt 0 ] || usage
+cmd=$1; shift
+opt_id="" opt_rotate="" opt_force="" opt_no_restart="" tmp=""
+args=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dir) dir=${2:?--dir needs a directory}; shift 2 ;;
+        --id) opt_id=${2:?--id needs an id}; shift 2 ;;
+        --rotate) opt_rotate=yes; shift ;;
+        --force) opt_force=yes; shift ;;
+        --no-restart) opt_no_restart=yes; shift ;;
+        -h | --help) usage ;;
+        -*) note "unknown option $1"; usage ;;
+        *) args+=("$1"); shift ;;
+    esac
+done
+case "$cmd" in
+    csr) cmd_csr ;;
+    install) cmd_install ;;
+    check) cmd_check ;;
+    status) cmd_status ;;
+    -h | --help) usage ;;
+    *) note "unknown command $cmd"; usage ;;
+esac

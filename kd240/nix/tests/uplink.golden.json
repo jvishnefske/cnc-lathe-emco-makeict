@@ -1,0 +1,61 @@
+{
+  "mode": "router",
+  "listen": { "endpoints": [] },
+  "connect": {
+    "endpoints": ["tcp/127.0.0.1:7447", "tls/mesh.updates.vishnefske.com:443"],
+    "exit_on_failure": false,
+    "timeout_ms": -1,
+    "retry": { "period_init_ms": 1000, "period_max_ms": 60000, "period_increase_factor": 2 }
+  },
+  "scouting": { "multicast": { "enabled": false }, "gossip": { "enabled": false } },
+  "plugins_loading": { "enabled": false },
+  "transport": {
+    "link": {
+      "tls": {
+        "root_ca_certificate": "/var/lib/emco-mesh/tls/ca",
+        "connect_certificate": "/var/lib/emco-mesh/tls/cert",
+        "connect_private_key": "/var/lib/emco-mesh/tls/key",
+        "enable_mtls": true
+      }
+    }
+  },
+  "access_control": {
+    "enabled": true,
+    "default_permission": "deny",
+    "subjects": [
+      { "id": "local", "link_protocols": ["tcp"] },
+      { "id": "uplink", "link_protocols": ["tls"] }
+    ],
+    "rules": [
+      { "id": "local-all", "permission": "allow", "flows": ["ingress", "egress"],
+        "messages": ["put", "delete", "declare_subscriber", "query", "reply", "declare_queryable",
+                     "liveliness_token", "declare_liveliness_subscriber", "liveliness_query"],
+        "key_exprs": ["**", "@/**", "@mw/**"] },
+      { "id": "no-unit", "permission": "deny", "flows": ["ingress", "egress"],
+        "messages": ["put", "delete", "declare_subscriber", "query", "reply", "declare_queryable"],
+        "key_exprs": ["app/unit/**"] },
+      { "id": "cloud-queries-in", "permission": "allow", "flows": ["ingress"], "messages": ["query"],
+        "key_exprs": ["@mw/node/*/sys/info", "@mw/node/*/sys/trust/info", "@mw/node/*/sys/manifest",
+                      "@mw/node/*/sys/manifest/cm", "@mw/node/*/sys/payload/binding",
+                      "@mw/node/*/sys/payload/start", "@mw/node/*/sys/payload/stop",
+                      "@mw/node/*/sys/payload/bind", "@mw/node/*/sys/loader/begin",
+                      "@mw/node/*/sys/loader/chunk", "@mw/node/*/sys/loader/commit"] },
+      { "id": "cloud-subscribes-in", "permission": "allow", "flows": ["ingress"],
+        "messages": ["declare_subscriber"], "key_exprs": ["app/proc/*/state"] },
+      { "id": "board-queryables-out", "permission": "allow", "flows": ["egress"],
+        "messages": ["declare_queryable"], "key_exprs": ["@mw/node/*/sys/**"] },
+      { "id": "board-replies-out", "permission": "allow", "flows": ["egress"],
+        "messages": ["reply"], "key_exprs": ["@mw/node/**"] },
+      { "id": "board-state-out", "permission": "allow", "flows": ["egress"],
+        "messages": ["put"], "key_exprs": ["app/proc/*/state"] }
+    ],
+    "policies": [
+      { "id": "local", "rules": ["local-all"], "subjects": ["local"] },
+      { "id": "uplink-deny", "rules": ["no-unit"], "subjects": ["uplink"] },
+      { "id": "uplink-allow",
+        "rules": ["cloud-queries-in", "cloud-subscribes-in", "board-queryables-out",
+                  "board-replies-out", "board-state-out"],
+        "subjects": ["uplink"] }
+    ]
+  }
+}

@@ -51,7 +51,8 @@ let
         (plain c.systemd.timers.emco-mesh-uplink-expiry.timerConfig // {
           inherit (c.systemd.timers.emco-mesh-uplink-expiry) wantedBy;
         });
-      timeWaitSync = (s.systemd-time-wait-sync or { wantedBy = [ ]; }).wantedBy;
+      timeWaitSync = s ? systemd-time-wait-sync;
+      upstreamUnits = c.systemd.additionalUpstreamSystemUnits;
       zenohdVersion = c.services.emco-mesh.zenohdPackage.version;
       socat = lib.any (p: (p.pname or "") == "socat") c.environment.systemPackages;
       enroll = lib.any (p: (p.name or "") == "emco-mesh-enroll") c.environment.systemPackages;
@@ -173,10 +174,14 @@ pkgs.runCommand "kd240-uplink-eval"
     '.on.uplink.serviceConfig.ExecStart | test("/bin/zenohd --config /nix/store/[a-z0-9]{32}-zenohd-uplink.json5$")'
   check "on: with the same zenohd as the local router" \
     '(.on.uplink.serviceConfig.ExecStart | split(" ")[0]) == (.on.zenohd.serviceConfig.ExecStart | split(" ")[0])'
-  check "on: after the network, the clock and the local router" \
-    '.on.uplink.after as $a | all("network-online.target", "time-sync.target", "zenohd.service"; . as $t | $a | index($t))'
-  check "on: wants the network and the clock" \
-    '.on.uplink.wants as $a | all("network-online.target", "time-sync.target"; . as $t | $a | index($t))'
+  check "on: after the network and the local router" \
+    '.on.uplink.after as $a | all("network-online.target", "zenohd.service"; . as $t | $a | index($t))'
+  check "on: wants the network" '.on.uplink.wants | index("network-online.target")'
+  # Not the clock: an offline board would hold the uplink's start job (and
+  # multi-user.target, and nixos-rebuild switch) on time-sync.target. A bad
+  # clock is emco-mesh-enroll check's to report, and Restart= retries.
+  check "on: neither after nor wanting time-sync.target" \
+    '[.on.uplink | (.after, .wants, .requires)[] | select(. == "time-sync.target")] == []'
   check "on: started at boot" '.on.uplink.wantedBy | index("multi-user.target")'
   check "on: ExecStartPre is emco-mesh-enroll check, as root" \
     '.on.uplink.serviceConfig.ExecStartPre | test("^[+]/nix/store/[^ ]+/bin/emco-mesh-enroll check")'
@@ -188,9 +193,10 @@ pkgs.runCommand "kd240-uplink-eval"
     '.on.uplink.serviceConfig as $u | .on.zenohd.serviceConfig as $z
      | all("NoNewPrivileges", "ProtectSystem", "ProtectHome", "PrivateTmp", "PrivateDevices", "RestrictAddressFamilies", "MemoryMax";
            . as $k | $u[$k] == $z[$k])'
-  check "on: systemd-time-wait-sync holds time-sync.target (the board has no RTC)" \
-    '.on.timeWaitSync | index("time-sync.target")'
-  check "off: and it does not without the uplink" '.off.timeWaitSync | index("time-sync.target") | not'
+  check "on: systemd-time-wait-sync is not pulled in" \
+    '(.on.timeWaitSync | not) and (.on.upstreamUnits | index("systemd-time-wait-sync.service") | not)'
+  check "off: nor without the uplink" \
+    '(.off.timeWaitSync | not) and (.off.upstreamUnits | index("systemd-time-wait-sync.service") | not)'
   check "on: a daily expiry check" '.on.expiryTimer.OnCalendar == "daily" and (.on.expiryTimer.wantedBy | index("timers.target"))'
   check "on: which stops the uplink once the certificate fails" \
     '.on.expiry.serviceConfig.ExecStart | test("/nix/store/[^ ]+emco-mesh-uplink-expiry")'

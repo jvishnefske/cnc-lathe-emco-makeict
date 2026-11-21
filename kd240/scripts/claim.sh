@@ -8,8 +8,10 @@
 #   kd240/scripts/claim.sh unit --info            # trust info only
 #
 # A claim never travels over Zenoh: it goes over the node's local serial
-# link. On the board that link is a PTY inside the node's unit, drained by a
-# daemon with a root-only socket beside it (/run/emco-mesh-claim-<node>/sock).
+# link. On the board that link is a PTY made, and always drained, by a root
+# unit per node (emco-mesh-claim-link-<node>), with a socket beside it that
+# only root can use (/run/emco-mesh-claim-<node>/sock: root 0600, and the
+# daemon checks each client's uid).
 # This script makes a PTY here with socat, joined over `ssh … sudo socat` to
 # that socket, and runs mwctl on it:
 #

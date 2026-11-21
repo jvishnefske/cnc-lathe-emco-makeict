@@ -204,6 +204,13 @@
             ./claim-smoke.sh ${./kd240/scripts/claim-link.py} ./claim.sh
             touch $out
           '';
+          # The claim link under a real systemd: mesh.nix and middleware's
+          # posix-node module in a VM of the board's release, a stand-in node
+          # (kd240/nix/tests/claim-link-vm.nix). Needs KVM.
+          kd240-claim-link-vm = import ./kd240/nix/tests/claim-link-vm.nix {
+            pkgs = nixpkgs-linuxcnc.legacyPackages.${system};
+            inherit (kd240Mesh) posixNodeModule;
+          };
           # emco-mesh-enroll (the board's key, CSR and certificate) against
           # a throwaway CA, as this host's build of the board's script.
           kd240-enroll = pkgs.runCommand "kd240-enroll"

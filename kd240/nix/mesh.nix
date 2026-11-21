@@ -22,14 +22,18 @@
 #                          directory and id
 #   emco-mesh-announce     mDNS: `_emco-lathe._tcp` on the UI's port, its TXT
 #                          naming both node ids (for M7's autoprobe)
-#   claim link             (claimLink.enable, W4b) each node's local serial
+#   emco-mesh-claim-link-{unit,process}
+#                          (claimLink.enable, W4b) each node's local serial
 #                          link (MW_POSIX_NODE_LOCAL_SERIAL, where a node is
-#                          claimed) is a PTY made inside its own unit by
-#                          scripts/claim-link.py, at
-#                          /run/emco-mesh-claim-{unit,process}/tty, and
-#                          always drained; root reaches it on the socket
-#                          beside it (scripts/claim.sh: mwctl on the laptop,
-#                          ssh, socat). Needs a posix-node that opens a PTY
+#                          claimed): a root unit running scripts/claim-link.py
+#                          makes a PTY, always drained, with its slave at
+#                          /run/emco-mesh-claim-<node>/tty handed to the
+#                          node's uid, and a socket beside it that only root
+#                          may use (0600 root and SO_PEERCRED; scripts/claim.sh:
+#                          mwctl on the laptop, ssh, socat). Both nodes run as
+#                          one uid, mw-posix-node, so either can open the
+#                          other's slave, but not its socket (BRINGUP.md
+#                          gaps). Needs a posix-node that opens a PTY
 #                          (middleware bc80998): flake.nix kd240Mesh.
 #   emco-mesh-uplink       (uplink.enable, W4b) a SECOND zenohd, with no
 #                          listener, linking the local router to the cloud
@@ -190,30 +194,57 @@ let
   claimDir = which: "emco-mesh-claim-${which}";
   # The node's command as middleware's module has it.
   nodeExec = lib.escapeShellArgs ([ (lib.getExe cfg.posixNodePackage) ] ++ config.services.mw-posix-node.args);
-  # ExecStart of both node units with the claim link: the daemon in the
-  # background (same unit, same cgroup: it stops with the node), then the
-  # node, exec'd. A daemon that fails to come up never keeps the node down:
-  # the node then starts without a local link, and says so in the journal.
-  claimWrapper = pkgs.writeShellScript "emco-mesh-claim-link" ''
-    dir=''${RUNTIME_DIRECTORY%%:*}
-    ${pkgs.python3}/bin/python3 -I ${../scripts/claim-link.py} &
+  # ExecStart of both node units with the claim link: wait up to 5 s for
+  # the claim link's tty (its root unit makes it), then the node, exec'd. A
+  # claim link that is not there never keeps the node down: the node then
+  # starts without a local link, and says so in the journal.
+  claimWrapper = pkgs.writeShellScript "emco-mesh-claim-node" ''
+    tty=''${MW_POSIX_NODE_LOCAL_SERIAL:-}
     i=0
-    while [ "$i" -lt 50 ] && ! { [ -e "$dir/tty" ] && [ -S "$dir/sock" ]; }; do
+    while [ "$i" -lt 50 ] && ! { [ -r "$tty" ] && [ -w "$tty" ]; }; do
       ${pkgs.coreutils}/bin/sleep 0.1
       i=$((i + 1))
     done
-    if [ -e "$dir/tty" ] && [ -S "$dir/sock" ]; then
-      echo "emco-mesh-claim-link: local link $dir/tty, claim with kd240/scripts/claim.sh" >&2
+    if [ -r "$tty" ] && [ -w "$tty" ]; then
+      echo "emco-mesh-claim-node: local link $tty, claim with kd240/scripts/claim.sh" >&2
     else
-      echo "emco-mesh-claim-link: NO CLAIM LINK (the daemon did not come up in 5 s): starting the node without MW_POSIX_NODE_LOCAL_SERIAL" >&2
+      echo "emco-mesh-claim-node: NO CLAIM LINK ($tty missing or not ours after 5 s): starting the node without MW_POSIX_NODE_LOCAL_SERIAL" >&2
       unset MW_POSIX_NODE_LOCAL_SERIAL
     fi
     exec "$@"
   '';
-  claimUnit = which: lib.optionalAttrs claim {
-    RuntimeDirectory = claimDir which;
-    RuntimeDirectoryMode = "0700";
+  # The claim link of one node, as root: the PTY (its slave handed to the
+  # node's user) and the socket, root's alone (mode 0600 and SO_PEERCRED).
+  # systemd binds the host's /dev/pts into a PrivateDevices /dev and allows
+  # char-pts, so both this unit and the node keep PrivateDevices and still
+  # meet on the same PTY.
+  claimLinkUnit = which: user: {
+    description = "Claim link of the ${which} node: its local serial PTY and root's socket";
+    wantedBy = [ "multi-user.target" ];
+    serviceConfig = {
+      ExecStart = "${pkgs.python3}/bin/python3 -I ${../scripts/claim-link.py} --dir /run/${claimDir which} --owner ${user} --allow-uid 0";
+      RuntimeDirectory = claimDir which;
+      RuntimeDirectoryMode = "0755";
+      Restart = "always";
+      RestartSec = "2s";
+      CapabilityBoundingSet = "CAP_CHOWN";
+      NoNewPrivileges = true;
+      PrivateDevices = true;
+      ProtectSystem = "strict";
+      ProtectHome = true;
+      PrivateTmp = true;
+      ProtectKernelTunables = true;
+      ProtectKernelModules = true;
+      ProtectControlGroups = true;
+      RestrictAddressFamilies = [ "AF_UNIX" ];
+      RestrictNamespaces = true;
+      LockPersonality = true;
+      MemoryMax = "32M";
+    };
   };
+  claimDeps = which: lib.optionalAttrs claim (
+    let c = "emco-mesh-claim-link-${which}.service"; in { wants = [ c ]; after = [ c ]; partOf = [ c ]; }
+  );
   claimEnv = which: lib.optionalAttrs claim {
     MW_POSIX_NODE_LOCAL_SERIAL = "/run/${claimDir which}/tty";
   };
@@ -311,9 +342,11 @@ in
       type = types.bool;
       default = true;
       description = ''
-        A local serial link for each node, so it can be claimed: a PTY in
-        the node's unit, always drained, with a root-only socket beside it
-        (/run/emco-mesh-claim-{unit,process}/sock) for kd240/scripts/claim.sh.
+        A local serial link for each node, so it can be claimed: a PTY made
+        by a root unit per node (emco-mesh-claim-link-<node>), always
+        drained, its slave handed to the node's uid, with a root-only socket
+        beside it (/run/emco-mesh-claim-{unit,process}/sock, 0600 root and
+        checked by SO_PEERCRED) for kd240/scripts/claim.sh.
         Needs a mw-posix-node that accepts a PTY as its local serial port
         (middleware bc80998): an older one fails to open it and exits.
       '';
@@ -408,9 +441,9 @@ in
             "${run}/unit.env"
             "-/var/lib/mw-robot/robot.env"
           ];
-        } // lib.optionalAttrs claim ({
+        } // lib.optionalAttrs claim {
           ExecStart = lib.mkForce "${claimWrapper} ${nodeExec}";
-        } // claimUnit "unit");
+        };
       };
 
       # A node hosts one payload, so the process model gets a node of its
@@ -426,9 +459,9 @@ in
           MW_GATEWAY_DOWNLINK = "app/proc/**,app/unit/**";
         };
         unitConfig.StartLimitIntervalSec = 0;
-        # ExecStart (the claim link's wrapper, or the node) is the unit
-        # node's; the wrapper finds its own RuntimeDirectory.
-        serviceConfig = builtins.removeAttrs posixService.serviceConfig [ "ExecStartPre" ] // claimUnit "process" // {
+        # ExecStart (the claim wrapper, or the node) is the unit node's;
+        # the wrapper waits for this unit's own MW_POSIX_NODE_LOCAL_SERIAL.
+        serviceConfig = builtins.removeAttrs posixService.serviceConfig [ "ExecStartPre" ] // {
           StateDirectory = "mw-posix-node-process";
           EnvironmentFile = [ "${run}/process.env" "-/var/lib/mw-robot/robot.env" ];
         };
@@ -449,6 +482,12 @@ in
     }
 
     (mkIf claim {
+      systemd.services.emco-mesh-claim-link-unit = claimLinkUnit "unit" posixService.serviceConfig.User;
+      systemd.services.emco-mesh-claim-link-process =
+        claimLinkUnit "process" config.systemd.services.mw-posix-node-process.serviceConfig.User;
+      # A new claim link is a new PTY: the node restarts with it.
+      systemd.services.mw-posix-node = claimDeps "unit";
+      systemd.services.mw-posix-node-process = claimDeps "process";
       # For claim.sh: `sudo socat - UNIX-CONNECT:/run/emco-mesh-claim-*/sock`.
       environment.systemPackages = [ pkgs.socat ];
     })

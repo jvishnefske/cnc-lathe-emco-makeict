@@ -63,14 +63,31 @@ start/stop. A claim never passes `gw/sys` or Zenoh (mwctl refuses
 **The claim link** (`services.emco-mesh.claimLink`, `nix/mesh.nix`) is that
 port on the KD240:
 
-* Each node's unit makes a PTY of its own, with `scripts/claim-link.py`
-  running beside the node in the same unit. It is at
-  `/run/emco-mesh-claim-unit/tty` or `/run/emco-mesh-claim-process/tty`
-  (`PrivateDevices` hides the host's devices from the node).
+* Each node has a root unit of its own, `emco-mesh-claim-link-unit` or
+  `emco-mesh-claim-link-process`, running `scripts/claim-link.py`. It makes
+  a PTY and hands the PTY's slave to the node's uid (0600), at
+  `/run/emco-mesh-claim-unit/tty` or `/run/emco-mesh-claim-process/tty`.
+  systemd binds the host's `/dev/pts` into the node's `PrivateDevices`
+  `/dev` and allows PTY devices there, so the node opens it by that path
+  and keeps `PrivateDevices`. The node unit wants that unit, starts after
+  it and restarts with it (a new PTY).
 * The daemon always drains the PTY, because the node writes every
   publication to its local link as well.
-* It forwards to a root-only socket beside the PTY
-  (`/run/emco-mesh-claim-<node>/sock`, 0600 in a 0700 directory).
+* It forwards to a socket beside the PTY, `/run/emco-mesh-claim-<node>/sock`,
+  that only root can use: root:root 0600 in a root 0755 directory, and the
+  daemon also checks every client's uid (`SO_PEERCRED`) and closes anyone
+  but root.
+* **Shared uid (known gap, pre-existing).** Both nodes run as one uid,
+  `mw-posix-node` (the process node's unit copies the unit node's, state
+  directories included). So either node can open the other's PTY slave,
+  which is the node's own end: it could read what root sends that node and
+  answer in its place. Neither can reach the other's socket, where the
+  claim's Origin::Serial authority comes from.
+* `kd240-claim-link-vm` checks this under a real systemd (a VM of the
+  board's release, the real `mesh.nix` and posix-node module, a stand-in
+  node): root reaches the node; the node's uid and another user cannot
+  connect, and with the socket's mode opened up the daemon still refuses
+  the node's uid.
 
 `scripts/claim.sh` claims a node from the laptop. socat makes a PTY on the
 laptop, joined over `ssh admin@kd240.local sudo socat -
@@ -418,6 +435,7 @@ old one as `key.old`.
 | 2 | a posix-node that opens a PTY as its local port (the claim link stays off until then) | middleware `bc80998` (W4b-0), then `ptyLocalSerial = true` in `flake.nix` |
 | 2 | an mwctl that opens a PTY (`--port` on claim.sh's socat PTY) | middleware, `tools/mwctl/src/port.rs` (as `bc80998`) |
 | 2 | the fleet agent on the default configuration, or the A/B card booted | `nix/ab.nix` on a board |
+| 2 | one uid per node: both run as `mw-posix-node` (pre-existing; either can open the other's claim PTY slave and state directory, not its claim socket) | `nix/mesh.nix` (a `User=` for the process node) |
 | 3 | posix-node's `sys/*` keys over Zenoh | W4a (middleware) |
 | 3 | an `mwctl` package (`--features zenoh`) from the flake | middleware flake / lathe flake |
 | 3 | the signed control target rule for posix-node over Zenoh | W4a |

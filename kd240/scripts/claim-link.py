@@ -1,14 +1,25 @@
 """claim-link: a node's local serial link on the KD240, as a PTY that is always drained.
 
-Runs inside each mw-posix-node unit (kd240/nix/mesh.nix, claimLink), beside
-the node, started by the unit's wrapper. In $RUNTIME_DIRECTORY (0700):
+One per node, as root, in a unit of its own (emco-mesh-claim-link-<node>,
+kd240/nix/mesh.nix, claimLink). In DIR (/run/emco-mesh-claim-<node>, root
+0755):
 
   tty   a symlink to the slave of a PTY this process owns: the node's
-        MW_POSIX_NODE_LOCAL_SERIAL. It is made inside the unit because the
-        node's PrivateDevices hides the host's devices.
-  sock  a unix socket (0600), at most one client at a time; a new client
-        replaces the old. Only root reaches it: claim.sh runs
+        MW_POSIX_NODE_LOCAL_SERIAL. The slave is handed to the node's user
+        (--owner), mode 0600. The node's PrivateDevices /dev still has the
+        host's PTYs (systemd binds /dev/pts into it), so it opens the slave
+        by this path; it owns nothing else here.
+  sock  a unix socket, root's, 0600, at most one client at a time (a new
+        client replaces the old). A client is also checked by its
+        credentials (SO_PEERCRED): any uid not in --allow-uid (default: this
+        process's own, root) is closed at once. claim.sh runs
         `sudo socat - UNIX-CONNECT:…/sock` over ssh for mwctl on the laptop.
+
+The slave is open to root and to the node's uid. Both nodes run as the
+same uid (mw-posix-node), so the other node's process could open this
+slave, which is the node's own end (it could read what root sends the node
+and answer in its place), but never the socket, which is where a claim's
+Origin::Serial authority comes from.
 
 The node writes every publication to its local link as well, waiting up to
 200 ms per frame for a write. So with no client attached everything the
@@ -16,13 +27,16 @@ node writes is read and dropped, and a slow client is dropped rather than
 let the PTY fill. The slave is held open here, raw, so the master never
 sees EIO when the node closes it.
 
-No dependencies beyond Python's standard library. Run as
-`python3 -I claim-link.py` with RUNTIME_DIRECTORY set (or --dir DIR).
+No dependencies beyond Python's standard library:
+  python3 -I claim-link.py --dir DIR [--owner USER] [--allow-uid UID]...
 """
 
+import argparse
 import errno
 import os
 import pty
+import pwd
+import struct
 import select
 import signal
 import socket
@@ -38,12 +52,26 @@ def log(msg):
     print(f"claim-link: {msg}", file=sys.stderr, flush=True)
 
 
+def peer_uid(conn):
+    """The connecting process's uid, from the kernel (SO_PEERCRED)."""
+    creds = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+    _pid, uid, _gid = struct.unpack("3i", creds)
+    return uid
+
+
 class Link:
-    def __init__(self, directory):
+    def __init__(self, directory, owner=None, allow=None):
         self.dir = directory
-        os.chmod(self.dir, 0o700)
+        self.allow = set(allow) if allow else {os.geteuid()}
+        os.chmod(self.dir, 0o755)
         self.master, self.slave = pty.openpty()
         tty.setraw(self.slave)
+        # Mode first: once the slave is the node's, changing it would need
+        # CAP_FOWNER, which the unit does not have (CAP_CHOWN only).
+        os.fchmod(self.slave, 0o600)
+        if owner is not None:
+            pw = pwd.getpwnam(owner)
+            os.fchown(self.slave, pw.pw_uid, pw.pw_gid)
         os.set_blocking(self.master, False)
         self.tty_path = os.path.join(self.dir, "tty")
         self.sock_path = os.path.join(self.dir, "sock")
@@ -79,6 +107,11 @@ class Link:
         try:
             conn, _ = self.listener.accept()
         except BlockingIOError:
+            return
+        uid = peer_uid(conn)
+        if uid not in self.allow:
+            log(f"refused a peer with uid {uid} (allowed: {sorted(self.allow)})")
+            conn.close()
             return
         if self.client is not None:
             self.drop_client("replaced by a new client")
@@ -162,18 +195,18 @@ class Link:
 
 
 def main():
-    directory = os.environ.get("RUNTIME_DIRECTORY", "")
-    if len(sys.argv) == 3 and sys.argv[1] == "--dir":
-        directory = sys.argv[2]
-    elif len(sys.argv) != 1:
-        print("usage: claim-link.py [--dir DIR]   (default: $RUNTIME_DIRECTORY)", file=sys.stderr)
-        return 2
-    # systemd's RuntimeDirectory= may list several, colon-separated.
-    directory = directory.split(":")[0]
+    p = argparse.ArgumentParser(description="the claim link's PTY daemon")
+    p.add_argument("--dir", default=os.environ.get("RUNTIME_DIRECTORY", "").split(":")[0],
+                   help="where tty and sock go (default: $RUNTIME_DIRECTORY)")
+    p.add_argument("--owner", help="the user the PTY's slave is handed to (the node's)")
+    p.add_argument("--allow-uid", type=int, action="append", default=[],
+                   help="a uid that may connect (repeatable; default: this process's own)")
+    a = p.parse_args()
+    directory = a.dir
     if not directory or not os.path.isdir(directory):
-        log(f"no directory ({directory!r}): set RUNTIME_DIRECTORY or --dir")
+        log(f"no directory ({directory!r}): give --dir or set RUNTIME_DIRECTORY")
         return 1
-    link = Link(directory)
+    link = Link(directory, a.owner, a.allow_uid)
 
     def stop(signum, _frame):
         link.close()

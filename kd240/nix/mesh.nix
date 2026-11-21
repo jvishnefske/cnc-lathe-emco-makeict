@@ -502,22 +502,16 @@ in
       ];
       environment.systemPackages = [ enroll ];
 
-      # The KD240 has no RTC: until timesyncd has synced, the clock is the
-      # last shutdown's (or the build's) and a certificate may look "not
-      # yet valid". time-sync.target waits for the sync, but not for ever:
-      # with no NTP for 5 minutes this unit fails (visibly) and the uplink's
-      # check says to look at the clock, retried every 2 minutes.
-      systemd.additionalUpstreamSystemUnits = [ "systemd-time-wait-sync.service" ];
-      systemd.services.systemd-time-wait-sync = {
-        wantedBy = [ "time-sync.target" ];
-        serviceConfig.TimeoutStartSec = "5min";
-      };
-
+      # Not ordered after time-sync.target: an offline board would hold the
+      # uplink's start job, multi-user.target and nixos-rebuild switch on
+      # it. The KD240 has no RTC, so until timesyncd syncs, a certificate
+      # can look not yet valid: ExecStartPre's check says so (check the
+      # clock) and Restart= tries again every 2 minutes.
       systemd.services.emco-mesh-uplink = {
         description = "Zenoh uplink: the lathe's router to the cloud mesh (mTLS)";
         wantedBy = [ "multi-user.target" ];
-        wants = [ "network-online.target" "time-sync.target" "zenohd.service" ];
-        after = [ "network-online.target" "time-sync.target" "zenohd.service" ];
+        wants = [ "network-online.target" "zenohd.service" ];
+        after = [ "network-online.target" "zenohd.service" ];
         unitConfig.StartLimitIntervalSec = 0;
         serviceConfig = {
           # As root (the key is 0640): no certificate, or a bad one, and

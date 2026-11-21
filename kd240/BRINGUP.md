@@ -363,8 +363,11 @@ loopback router to the cloud mesh router at
 Then `just deploy`. That adds the unit, its user, `/var/lib/emco-mesh/tls`
 (`ca`, `cert`, `key`; root:emco-mesh-uplink 0750) and `emco-mesh-enroll`.
 
-* **The clock.** The KD240 has no RTC. `systemd-time-wait-sync` holds
-  `time-sync.target` for up to 5 minutes, and the uplink starts after it.
+* **The clock.** The KD240 has no RTC, and the uplink does not wait for
+  the clock: on an offline board that would hold `multi-user.target` and
+  `nixos-rebuild switch`. Until timesyncd syncs, the clock may make the
+  certificate look not yet valid. The start check then says to check the
+  clock, and the uplink tries again every 2 minutes.
 * **Its start check.** The uplink's `ExecStartPre` is `emco-mesh-enroll
   check`. With no certificate, or a bad one, the uplink does not start, and
   it retries every 2 minutes.

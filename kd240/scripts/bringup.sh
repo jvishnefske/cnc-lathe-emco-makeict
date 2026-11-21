@@ -97,6 +97,14 @@ fi
 if [ -n "$key" ] && [ -n "$pkcs11" ]; then
     echo "--key and --pkcs11: give one" >&2; exit 2
 fi
+# --host and --user go to ssh and scp: a name, never an option or a shell word.
+valid_name() { case "$1" in "" | -* | *[!A-Za-z0-9._-]*) return 1 ;; esac; }
+if ! valid_name "$host"; then
+    echo "--host must be letters, digits, . _ - (not starting with -): '$host'" >&2; exit 2
+fi
+if ! valid_name "$user"; then
+    echo "--user must be letters, digits, . _ - (not starting with -): '$user'" >&2; exit 2
+fi
 if [ -n "$cert$ca" ] && { [ -z "$cert" ] || [ -z "$ca" ]; }; then
     echo "--cert and --ca go together" >&2; exit 2
 fi
@@ -143,14 +151,22 @@ unit_env() {
     on_board systemctl show "$1" -p Environment --value 2>/dev/null || true
 }
 
-# The node ids emco-mesh-ids wrote (UNIT=, PROCESS=).
+# The node ids emco-mesh-ids wrote (UNIT=, PROCESS=): 16 lowercase hex
+# digits each, or neither is used (they end up in local file names).
 read_ids() {
     UNIT=""; PROCESS=""
-    local ids
+    local ids u p
     ids=$(on_board cat /run/emco-mesh/ids 2>/dev/null) || return 1
-    UNIT=$(printf '%s\n' "$ids" | sed -n 's/^UNIT=//p')
-    PROCESS=$(printf '%s\n' "$ids" | sed -n 's/^PROCESS=//p')
-    [ -n "$UNIT" ] && [ -n "$PROCESS" ]
+    u=$(printf '%s\n' "$ids" | sed -n 's/^UNIT=//p' | head -1)
+    p=$(printf '%s\n' "$ids" | sed -n 's/^PROCESS=//p' | head -1)
+    local id
+    for id in "$u" "$p"; do
+        case "$id" in
+            [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+            *) bad "/run/emco-mesh/ids: UNIT and PROCESS must be 16 lowercase hex digits (UNIT='$u' PROCESS='$p')"; return 1 ;;
+        esac
+    done
+    UNIT=$u; PROCESS=$p
 }
 
 # mwctl's key options, as an array.
@@ -666,10 +682,12 @@ step8() {
         return "$r"
     fi
     if [ -n "$cert" ]; then
-        local base
+        local base cab
         base=$(basename "$cert")
+        cab=$(basename "$ca")
         scp -q -o BatchMode=yes "$cert" "$ca" "$target:/tmp/" || { bad "scp failed"; return 1; }
-        if on_board sudo emco-mesh-enroll install "/tmp/$base" "/tmp/$(basename "$ca")"; then
+        # ssh hands the board's shell one string: quote each name for it.
+        if on_board sudo emco-mesh-enroll install "$(printf '%q' "/tmp/$base")" "$(printf '%q' "/tmp/$cab")"; then
             ok "installed $base; emco-mesh-uplink restarted"
             apply="" cert="" ca="" step8
             return $?

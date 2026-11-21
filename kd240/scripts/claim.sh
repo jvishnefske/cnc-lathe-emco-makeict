@@ -53,8 +53,8 @@ socket=""
 while [ $# -gt 0 ]; do
     case "$1" in
         unit | process) which=$1; shift ;;
-        --host) host=${2:?--host needs a host}; shift 2 ;;
-        --user) user=${2:?--user needs a user}; shift 2 ;;
+        --host) host=${2?--host needs a host}; shift 2 ;;
+        --user) user=${2?--user needs a user}; shift 2 ;;
         --key) key=${2:?--key needs a file}; shift 2 ;;
         --pkcs11) pkcs11=${2:?--pkcs11 needs a label}; shift 2 ;;
         --info) info_only=yes; shift ;;
@@ -64,6 +64,14 @@ while [ $# -gt 0 ]; do
     esac
 done
 die() { printf 'claim.sh: %s\n' "$*" >&2; exit 1; }
+# --host and --user go to ssh: a name, never an option or a shell word.
+valid_name() { case "$1" in "" | -* | *[!A-Za-z0-9._-]*) return 1 ;; esac; }
+for v in "host:$host" "user:$user"; do
+    if ! valid_name "${v#*:}"; then
+        printf 'claim.sh: --%s must be letters, digits, . _ - (not starting with -): %s\n' "${v%%:*}" "'${v#*:}'" >&2
+        exit 2
+    fi
+done
 [ -n "$which" ] || { printf 'claim.sh: which node: unit or process\n\n%s' "$HELP" >&2; exit 2; }
 if [ -n "$key" ] && [ -n "$pkcs11" ]; then die "--key and --pkcs11: give one"; fi
 if [ -z "$info_only" ] && [ -z "$key$pkcs11" ]; then die "give --key FILE or --pkcs11 LABEL (or --info)"; fi

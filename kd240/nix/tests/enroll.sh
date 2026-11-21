@@ -208,6 +208,24 @@ else
 fi
 [ "$(stat -c %a "$dir/key")" = 640 ] && ok "rotated key mode 0640" || fail "rotated key mode"
 expect_fail "after rotate, the old cert no longer matches the key" "key" check
+# The retired key is nobody's but root's: 0600 (and root:root when run as root).
+[ "$(stat -c %a "$dir/key.old")" = 600 ] && ok "key.old mode 0600" || fail "key.old mode $(stat -c %a "$dir/key.old")"
+if [ "$(id -u)" -eq 0 ]; then
+    [ "$(stat -c %u:%g "$dir/key.old")" = 0:0 ] && ok "key.old root:root" || fail "key.old owner $(stat -c %U:%G "$dir/key.old")"
+fi
+# A second rotate would lose the key in key.old: refused without --force.
+key2=$(sum "$dir/key") old1=$(sum "$dir/key.old")
+expect_fail "csr --rotate again, with key.old there, is refused" "key.old.*--force" csr --rotate
+[ "$(sum "$dir/key")" = "$key2" ] && [ "$(sum "$dir/key.old")" = "$old1" ] \
+    && ok "the refused rotate changed neither key" || fail "the refused rotate changed a key"
+run csr --rotate --force
+if [ "$rc" -eq 0 ] && [ "$(sum "$dir/key.old")" = "$key2" ] && [ "$(sum "$dir/key")" != "$key2" ]; then
+    ok "csr --rotate --force: the current key to key.old, a new key"
+else
+    fail "csr --rotate --force (rc $rc): $err"
+fi
+[ "$(stat -c %a "$dir/key.old")" = 600 ] && ok "key.old mode 0600 after --force" || fail "key.old mode after --force"
+expect_fail "--force alone (without --rotate) is refused" "--force.*--rotate" csr --force
 
 # ---- root -------------------------------------------------------------------
 if [ "$(id -u)" -ne 0 ]; then
